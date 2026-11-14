@@ -20,7 +20,7 @@ This guide covers how to run the automated tests locally. Tests run on
 
 ## Prerequisites
 
-- Node.js 20+ (same as the app).
+- Node.js 22.12+ (same as the app; the bundled `markdown-to-word` server needs it).
 - Dependencies installed: `npm install`.
 - For the **optional** tests only: the `uv`/`uvx` toolchain on your PATH
   (see [Optional tests](#optional-uvx-based-server-tests)).
