@@ -144,6 +144,13 @@ function resolveNodePackage(args: string[]): { entry: string; rest: string[] } |
   }
 }
 
+// Under ELECTRON_RUN_AS_NODE, Commander-based CLIs (e.g. markdown-to-word)
+// detect `process.versions.electron` and, unless `process.defaultApp` is set,
+// treat the script path as a user argument ("too many arguments"). Setting it
+// makes them parse argv like plain Node. Packages that don't use Commander
+// ignore it.
+const ELECTRON_NODE_ARGS = ['--import', 'data:text/javascript,process.defaultApp=true']
+
 interface StdioLaunch {
   command: string
   args: string[]
@@ -157,7 +164,7 @@ interface StdioLaunch {
 //   • `npx <pkg>` launchers are rerouted through Electron's built-in Node
 //     (process.execPath + ELECTRON_RUN_AS_NODE) against the bundled package, so
 //     Node itself need not be installed.
-function resolveStdioLaunch(server: {
+export function resolveStdioLaunch(server: {
   command: string
   args?: string[]
   env?: Record<string, string>
@@ -171,7 +178,7 @@ function resolveStdioLaunch(server: {
     if (resolved) {
       return {
         command: process.execPath,
-        args: [resolved.entry, ...resolved.rest],
+        args: [...ELECTRON_NODE_ARGS, resolved.entry, ...resolved.rest],
         env: { ...env, ELECTRON_RUN_AS_NODE: '1' }
       }
     }

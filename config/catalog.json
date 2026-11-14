@@ -26,6 +26,17 @@
       "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"
     },
     {
+      "id": "word",
+      "name": "Word Documents",
+      "blurb": "Turn the agent's Markdown into a Word (.docx) document: headings, lists, tables, links, and code. Create-only; no Word install needed.",
+      "category": "Files",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "markdown-to-word", "mcp"],
+      "note": "Bundled with the app, so it runs offline without Node installed. It saves to whatever absolute .docx path the agent chooses and never overwrites an existing file unless asked, so tell the agent where to save (for example, a folder the Filesystem server can access). It cannot edit existing documents or write comments, tracked changes, or page layout.",
+      "homepage": "https://github.com/benbalter/markdown-to-word-js#mcp-server"
+    },
+    {
       "id": "fetch",
       "name": "Web Fetch",
       "blurb": "Fetch a URL and convert the page to clean markdown for the model to read.",
