@@ -41,6 +41,7 @@ import {
   ClockIcon,
   CpuChipIcon,
   DocumentTextIcon,
+  DocumentPlusIcon,
   ChartBarIcon,
   ChevronUpIcon,
   ExclamationTriangleIcon,
@@ -403,7 +404,7 @@ export function App(): JSX.Element {
     id: string
     draft: PitcherProposal
   } | null>(null)
-  // User-initiated napkin creation form; shown when the side button is clicked.
+  // User-initiated napkin creation form; shown from the top-bar button.
   const [showNapkinCreator, setShowNapkinCreator] = useState(false)
   const [serverStatus, setServerStatus] = useState<ServerStatus>('checking')
   const [connectionBusy, setConnectionBusy] = useState(false)
@@ -1673,6 +1674,14 @@ export function App(): JSX.Element {
               {tools.length}
             </span>
           </button>
+          <button
+            className="pantry-toggle"
+            onClick={() => setShowNapkinCreator(true)}
+            title="Create a napkin artifact"
+            aria-label="Create napkin"
+          >
+            <DocumentPlusIcon />
+          </button>
           <div className="window-controls">
             <button
               className="win-btn"
@@ -1709,15 +1718,6 @@ export function App(): JSX.Element {
       </header>
 
       <div className="stage">
-        {/* Subtle napkin creation button on right edge */}
-        <button
-          className="napkin-creator-btn"
-          onClick={() => setShowNapkinCreator(true)}
-          title="Create a napkin artifact (code, markdown, diagram, etc.)"
-          aria-label="Create napkin"
-        >
-          +
-        </button>
         <div className="chat-col">
           <div className="transcript" ref={scrollRef}>
         {entries.length === 0 && (

@@ -217,3 +217,12 @@ export function DocumentTextIcon(props: IconProps): JSX.Element {
     </Icon>
   )
 }
+
+// document-plus , create a napkin artifact
+export function DocumentPlusIcon(props: IconProps): JSX.Element {
+  return (
+    <Icon {...props}>
+      <path d="M13.5 2.25H6.75A2.25 2.25 0 0 0 4.5 4.5v15A2.25 2.25 0 0 0 6.75 21h6.75M13.5 2.25v5.25a2.25 2.25 0 0 0 2.25 2.25H21M13.5 2.25l7.5 7.5m-12 3.75h3m-3 3h3m5.25-1.5v6m3-3h-6" />
+    </Icon>
+  )
+}
