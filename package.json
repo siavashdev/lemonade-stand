@@ -54,11 +54,9 @@
   },
   "overrides": {
     "brace-expansion": "5.0.13",
-    "app-builder-lib": {
-      "minimatch": "11.0.8"
-    },
-    "@electron/universal": {
-      "minimatch": "11.0.8"
+    "minimatch@>=7.0.0 <11.0.1": "11.0.8",
+    "mermaid": {
+      "katex": "0.18.2"
     }
   }
 }
