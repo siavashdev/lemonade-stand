@@ -2980,6 +2980,32 @@ button.server-status:hover {
   align-items: center;
 }
 
+.pitcher-day-number {
+  width: 64px;
+}
+
+.pitcher-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pitcher-day {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pitcher-day.active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+}
+
 .pitcher-hint {
   font-weight: 400;
   font-style: normal;

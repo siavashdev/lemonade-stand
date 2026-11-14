@@ -172,6 +172,9 @@ file**. Requires `uvx`.
 (scheduled tasks) run prompts fresh on a timer or when the app opens
   - **On-open trigger**: runs once each app launch
   - **Daily trigger**: runs at a local HH:MM each day (with automatic catch-up on launch if the time was missed while the app was closed)
+  - **Weekly trigger**: runs at a local HH:MM on the weekdays you pick (e.g. Mondays, or Mon-Fri), with the same catch-up on launch
+  - **Monthly trigger**: runs at a local HH:MM on a chosen day of the month (a day past the end of a short month runs on its last day), with the same catch-up on launch
+  - **Interval trigger**: repeats every 15 minutes to 24 hours while the app is open (no catch-up for runs missed while it was closed)
   - **Per-task tool whitelist**: only explicitly-allowed MCP tools can auto-run during a pour; everything else is denied so scheduled tasks can't be steered into unintended actions
   - **Bounded retry**: if a local model flakily fails to call its tools, a pour retries once
   - **Dual output**: serve poured results to the **Napkin** panel (rich artifacts) or save as a **conversation** in history

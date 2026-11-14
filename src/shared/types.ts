@@ -320,12 +320,16 @@ export interface StoredSession extends SessionSummary {
   summary?: string
 }
 
-/** How a Pitcher fires. `on-open` runs once per app launch; `daily` runs at a
- * local "HH:MM" each day (and catches up on launch if that time was missed
- * while the app was closed). */
+/** How a Pitcher fires. `on-open` runs once per app launch; `daily`, `weekly`
+ * and `monthly` run at a local "HH:MM" (and catch up on launch if the most recent
+ * fire was missed while the app was closed); `interval` repeats every N minutes
+ * while the app is open. */
 export type PitcherTrigger =
   | { type: 'on-open' }
   | { type: 'daily'; at: string } // "HH:MM", 24-hour local time
+  | { type: 'weekly'; days: number[]; at: string } // days: 0=Sunday..6=Saturday
+  | { type: 'monthly'; day: number; at: string } // day 1-31; short months use their last day
+  | { type: 'interval'; everyMinutes: number }
 
 /** Where a finished pour is served. File output is a v2 concern. */
 export type PitcherOutput = 'napkin' | 'chat'
@@ -345,7 +349,7 @@ export interface Pitcher {
    * pour. Anything not listed is denied, so a scheduled task never gets a blank
    * cheque to run tools it wasn't explicitly granted. */
   allowedTools: string[]
-  /** Epoch ms of the last successful pour, for daily catch-up on launch. */
+  /** Epoch ms of the last successful pour, for catch-up on launch. */
   lastRunAt?: number
   /** Epoch ms of the last user-initiated Stop. Like `lastRunAt`, it marks a
    * daily fire as "handled" so a pour you deliberately stopped isn't caught up

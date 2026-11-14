@@ -13,6 +13,7 @@ import type {
   PitcherTrigger,
   PlanStep
 } from '@shared/types'
+import { normalizeTrigger } from '@shared/schedule'
 import type { LemonadeClient } from '../lemonade/client'
 import type { McpManager } from '../mcp/manager'
 import { dirname } from 'path'
@@ -270,13 +271,33 @@ const CREATE_PITCHER_TOOL_DEF: ChatCompletionTool = {
           properties: {
             type: {
               type: 'string',
-              enum: ['daily', 'on-open'],
+              enum: ['daily', 'weekly', 'monthly', 'interval', 'on-open'],
               description:
-                "'daily' fires at a local time each day; 'on-open' runs once each app launch."
+                "'daily' fires at a local time each day; 'weekly' on chosen weekdays at a local " +
+                "time (use for weekdays/weekends too); 'monthly' on a day of the month at a " +
+                "local time; 'interval' repeats every N minutes while the app is open; " +
+                "'on-open' runs once each app launch."
             },
             at: {
               type: 'string',
-              description: "For type 'daily', the 24-hour local time as HH:MM, e.g. '08:00'."
+              description:
+                "For 'daily', 'weekly' and 'monthly', the 24-hour local time as HH:MM, e.g. '08:00'."
+            },
+            days: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                "For 'weekly', the weekdays to run on as names, e.g. ['Mon', 'Thu']. " +
+                "'weekdays' means Mon-Fri."
+            },
+            day: {
+              type: 'integer',
+              description:
+                "For 'monthly', the day of the month, 1-31 (a short month runs on its last day)."
+            },
+            everyMinutes: {
+              type: 'integer',
+              description: "For 'interval', minutes between runs (5 to 1440), e.g. 120 for every 2 hours."
             }
           },
           required: ['type']
@@ -932,8 +953,9 @@ export class Agent {
   /**
    * Coerce the model's `create_pitcher` arguments into a clean, safe draft, or
    * null when unusable (no prompt). Tolerant of a weak model's rough output:
-   * clamps the name, defaults the output to 'chat', and only accepts a daily
-   * trigger with a valid 24-hour HH:MM time (else falls back to on-open). The
+   * clamps the name, defaults the output to 'chat', and normalizes the trigger
+   * (a daily/weekly/monthly one needs a valid 24-hour HH:MM time, else it falls
+   * back to on-open). The
    * proposed tool whitelist is filtered to tools that actually exist right now
    * (a hallucinated name is dropped) and merely PRE-SELECTS them in the review
    * editor , the user still confirms/edits the list before it's saved, so the
@@ -953,46 +975,9 @@ export class Agent {
     // Default to serving a saved conversation; only 'napkin' opts into the panel.
     const output: PitcherOutput = args.output === 'napkin' ? 'napkin' : 'chat'
 
-    // Accept the trigger as a nested object ({type, at}) or a loose top-level
-    // `at` string; anything that can't be read as a time becomes on-open. The
-    // parser is deliberately forgiving of how a weak model writes a time , "8",
-    // "8am", "8:30 pm", "0800" all work , since it often skips the strict HH:MM.
-    const toDaily = (value: unknown): PitcherTrigger | null => {
-      if (typeof value !== 'string') return null
-      let s = value.trim().toLowerCase()
-      if (!s) return null
-      const ampm = /(am|pm)/.exec(s)?.[1]
-      s = s.replace(/\s*(am|pm)\s*/, '').trim()
-      let h: number
-      let min = 0
-      const m = s.match(/^(\d{1,2})(?::(\d{1,2}))?$/)
-      if (m) {
-        h = parseInt(m[1], 10)
-        min = m[2] != null ? parseInt(m[2], 10) : 0
-      } else if (/^\d{3,4}$/.test(s)) {
-        // Bare digits like "800" or "0800".
-        const digits = s.padStart(4, '0')
-        h = parseInt(digits.slice(0, 2), 10)
-        min = parseInt(digits.slice(2), 10)
-      } else {
-        return null
-      }
-      if (ampm === 'pm' && h < 12) h += 12
-      if (ampm === 'am' && h === 12) h = 0
-      if (h < 0 || h > 23 || min < 0 || min > 59) return null
-      return { type: 'daily', at: `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}` }
-    }
-
-    let trigger: PitcherTrigger = { type: 'on-open' }
-    const t = args.trigger
-    if (t && typeof t === 'object') {
-      const rec = t as Record<string, unknown>
-      if (rec.type === 'daily') trigger = toDaily(rec.at) ?? { type: 'on-open' }
-      else if (rec.type === 'on-open') trigger = { type: 'on-open' }
-      else trigger = toDaily(rec.at) ?? { type: 'on-open' }
-    } else {
-      trigger = toDaily(args.at) ?? { type: 'on-open' }
-    }
+    // Accept the trigger as a nested object or a loose top-level `at` string;
+    // anything that can't be read becomes on-open.
+    const trigger = normalizeTrigger(args.trigger, args.at)
 
     // Pre-select the proposed tools, but keep only ones that really exist so a
     // made-up name can't slip through; the user reviews the checked list before
@@ -1112,7 +1097,7 @@ export class Agent {
             ? 'Scheduling is not available here; tell the user to create the task from the ' +
               'Pitchers panel instead.'
             : 'Could not draft the task: provide a non-empty prompt and a valid trigger ' +
-              '(daily with an HH:MM time, or on-open).'
+              '(daily/weekly/monthly with an HH:MM time, interval, or on-open).'
         })
         return
       }
