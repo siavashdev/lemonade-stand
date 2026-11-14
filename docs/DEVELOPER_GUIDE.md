@@ -115,6 +115,28 @@ pours get none, so scheduled runs can't be influenced).
   renderer clears its per-turn `collected` list when it adopts it.
 - Tests: [`test/agent-influence.test.ts`](../test/agent-influence.test.ts).
 
+# Stopping inference
+
+The chat transcript and its Stop button live in the renderer, but the agent turn
+runs in the main process, so a window reload or renderer crash used to leave a turn
+generating with nothing on screen to stop it.
+
+- **Orphan guard.** `cancelAgentTurn()` in [`src/main/index.ts`](../src/main/index.ts)
+  aborts the running turn and unblocks every pending approval, step-limit,
+  clarification and pitcher prompt. `abortOrphanedTurn()` calls it on a main-frame
+  navigation (reload) and on `render-process-gone`, and `agent:send` calls it so a
+  new turn can never leak an old one. Pitcher pours are headless and keep running.
+- **Force stop.** The "Server online" popover (`ServerActivitySection` in
+  [`App.tsx`](../src/renderer/App.tsx)) polls `agent:server-activity`
+  (`LemonadeClient.getActivity`, from `is_busy` / `is_streaming` in `/health`) and
+  offers **Stop inference** (`agent:force-stop`). That aborts the agent turn, any
+  transcription, running pours and every chat stream in `LemonadeClient.liveStreams`
+  (`abortInference`), then re-reads `/health` and reports what is still busy.
+- Lemonade has no per-request cancel endpoint: dropping the HTTP stream is the stop.
+  A model that stays busy (another client's request) can only be cut off with
+  `/unload`, which the Models panel offers for loaded and active models alike.
+- Tests: `force stop` in [`test/lemonade-client.test.ts`](../test/lemonade-client.test.ts).
+
 # Monitor
 
 A **Monitoring pill** in the status bar ([`src/renderer/MonitorPill.tsx`](../src/renderer/MonitorPill.tsx):

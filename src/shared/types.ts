@@ -253,6 +253,21 @@ export interface ModelInfo {
   active: boolean
 }
 
+/** What the Lemonade server is doing right now, read from its /health. */
+export interface ServerActivity {
+  online: boolean
+  /** Loaded models the server reports as busy or streaming. */
+  busy: { model: string; type?: string }[]
+}
+
+/** Result of a force stop of the app's own inference requests. */
+export interface ForceStopResult {
+  /** Agent turns, pours, transcriptions and streams that were aborted. */
+  aborted: number
+  /** Models the server still reported busy after the abort settled. */
+  stillBusy: string[]
+}
+
 /** Progress snapshot for a server-owned model download job, surfaced so the UI
  * can show a live progress bar, byte counts, and status for a model being
  * pulled. Mirrors (a subset of) the Lemonade server's /downloads job shape. */
@@ -648,6 +663,11 @@ export interface RendererApi {
   getAppVersion(): Promise<string>
   /** Ping the Lemonade server; true when it's reachable and healthy. */
   checkHealth(): Promise<boolean>
+  /** Which loaded models the server currently reports as busy or streaming. */
+  getServerActivity(): Promise<ServerActivity>
+  /** Force stop: abort every inference request the app has open (agent turn,
+   * pours, transcription, summaries), then report what the server still runs. */
+  forceStop(): Promise<ForceStopResult>
   /** The Lemonade server connection (base URL + API key) the app targets. */
   getConnection(): Promise<{ baseUrl: string; apiKey: string }>
   /** Repoint the app at a different Lemonade server, persist it, and re-probe.
