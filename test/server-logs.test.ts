@@ -275,6 +275,32 @@ describe('ServerLogStream', () => {
     expect(closed).toMatchObject({ message: expect.stringContaining('(ECONNREFUSED)') })
   })
 
+  it('rotates through the loopback addresses of a localhost server when connecting fails', () => {
+    stream.start()
+    sockets[0].fire('close')
+    vi.advanceTimersByTime(1_000)
+    sockets[1].fire('close')
+    vi.advanceTimersByTime(2_000)
+    sockets[2].fire('close')
+    vi.advanceTimersByTime(5_000)
+    expect(sockets.map((s) => s.url)).toEqual([
+      'ws://localhost:13305/logs/stream',
+      'ws://127.0.0.1:13305/logs/stream',
+      'ws://[::1]:13305/logs/stream',
+      'ws://localhost:13305/logs/stream'
+    ])
+  })
+
+  it('keeps the loopback address that worked when it later reconnects', () => {
+    stream.start()
+    sockets[0].fire('close')
+    vi.advanceTimersByTime(1_000)
+    sockets[1].fire('open')
+    sockets[1].fire('close')
+    vi.advanceTimersByTime(2_000)
+    expect(sockets[2].url).toBe('ws://127.0.0.1:13305/logs/stream')
+  })
+
   it('picks up a changed server address when it reconnects', () => {
     stream.start()
     connection = { baseUrl: 'http://other-host:9000/v1', apiKey: '' }

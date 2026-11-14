@@ -61,6 +61,8 @@ interface FakeServer {
   downloads: unknown[]
   /** Called for POST /chat/completions; returns the assistant's message content. */
   chatReply: (body: Record<string, unknown>) => string
+  /** When set, /chat/completions streams its first chunk and then never finishes. */
+  chatHang: boolean
   /** Called for POST /pull and POST /load so a test can evolve server state. */
   onPost: (path: string, body: Record<string, unknown>) => void | Promise<void>
   close: () => Promise<void>
@@ -84,6 +86,7 @@ async function startFakeServer(): Promise<FakeServer> {
     loaded: [],
     downloads: [],
     chatReply: () => 'ok',
+    chatHang: false,
     onPost: () => {},
     close: async () => {}
   }
@@ -133,6 +136,7 @@ async function startFakeServer(): Promise<FakeServer> {
             choices: [{ index: 0, delta, finish_reason: finish }]
           })}\n\n`
         res.write(chunk({ role: 'assistant' }, null))
+        if (fake.chatHang) return
         res.write(chunk({ content }, null))
         res.write(chunk({}, 'stop'))
         res.end('data: [DONE]\n\n')
@@ -287,6 +291,40 @@ describe('chat() with an ordinary model', () => {
     await client.chat([{ role: 'user', content: 'y' }], [])
     expect(first.message.content).toBe('Error: this is just what the model said')
     expect(fake.requests.filter((r) => r.path === '/models/Qwen3-4B')).toHaveLength(1)
+  })
+})
+
+describe('force stop', () => {
+  it('aborts a chat stream that has no caller left to cancel it', async () => {
+    fake.chatHang = true
+    client = new LemonadeClient(fake.url, '', 'Plain-Model')
+    const pending = client.chat([{ role: 'user', content: 'go' }], [])
+    const outcome = pending.then(
+      () => 'finished',
+      () => 'aborted'
+    )
+    await vi.waitFor(() => expect(chatPosts()).toHaveLength(1))
+    expect(client.abortInference()).toBe(1)
+    expect(await outcome).toBe('aborted')
+    // Nothing left to abort once the stream is gone.
+    expect(client.abortInference()).toBe(0)
+  })
+
+  it('reports which loaded models the server says are busy or streaming', async () => {
+    fake.loaded = [
+      { model_name: 'Idle-Model', type: 'llm', is_busy: false, is_streaming: false },
+      { model_name: 'Busy-Model', type: 'llm', is_busy: true, is_streaming: true }
+    ]
+    client = new LemonadeClient(fake.url, '', 'Busy-Model')
+    expect(await client.getActivity()).toEqual({
+      online: true,
+      busy: [{ model: 'Busy-Model', type: 'llm' }]
+    })
+  })
+
+  it('reports an unreachable server as offline', async () => {
+    client = new LemonadeClient('http://127.0.0.1:1/api/v1', '', 'Busy-Model')
+    expect(await client.getActivity(500)).toEqual({ online: false, busy: [] })
   })
 })
 

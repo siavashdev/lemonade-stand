@@ -24,6 +24,7 @@ import type {
   PlanStep,
   Recipe,
   SessionSummary,
+  ServerActivity,
   TranscriptEntry
 } from '@shared/types'
 import { DAY_NAMES, describeTrigger as describeTriggerLabel } from '@shared/schedule'
@@ -2440,6 +2441,79 @@ function ConnectionEditor({
         <p className="context-editor-err">Enter a full URL starting with http:// or https://.</p>
       )}
       {error && <p className="context-editor-err">{error}</p>}
+      <ServerActivitySection />
+    </div>
+  )
+}
+
+// Live view of what the server is generating, plus a force stop. Works without a
+// conversation on screen: a window reload clears the chat (and its Stop button)
+// while the agent turn keeps the server busy, and this is the way back to idle.
+function ServerActivitySection(): JSX.Element {
+  const [activity, setActivity] = useState<ServerActivity | null>(null)
+  const [stopping, setStopping] = useState(false)
+  const [result, setResult] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    const poll = (): void => {
+      window.api
+        .getServerActivity()
+        .then((a) => {
+          if (active) setActivity(a)
+        })
+        .catch(() => {})
+    }
+    poll()
+    const timer = setInterval(poll, 2000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
+
+  async function forceStop(): Promise<void> {
+    setStopping(true)
+    setResult(null)
+    try {
+      const { aborted, stillBusy } = await window.api.forceStop()
+      const base = `Aborted ${aborted} request${aborted === 1 ? '' : 's'}.`
+      setResult(
+        stillBusy.length > 0
+          ? `${base} ${stillBusy.join(', ')} still reports busy , another client may be driving it. Unload the model from Models to cut it off.`
+          : `${base} The server is idle.`
+      )
+      setActivity(await window.api.getServerActivity())
+    } catch (err) {
+      setResult(`Force stop failed: ${String(err)}`)
+    } finally {
+      setStopping(false)
+    }
+  }
+
+  const busy = activity?.busy ?? []
+  return (
+    <div className="server-activity">
+      <div className="server-activity-row">
+        <span className={`server-activity-state ${busy.length > 0 ? 'busy' : ''}`}>
+          {activity === null
+            ? 'Checking activity…'
+            : !activity.online
+              ? 'Server unreachable'
+              : busy.length > 0
+                ? `Generating: ${busy.map((b) => b.model).join(', ')}`
+                : 'Idle'}
+        </span>
+        <button
+          className="server-stop-btn"
+          disabled={stopping || activity?.online === false}
+          onClick={() => void forceStop()}
+          title="Abort every inference request this app has open, even if the chat was cleared"
+        >
+          {stopping ? 'Stopping…' : 'Stop inference'}
+        </button>
+      </div>
+      {result && <p className="context-editor-note">{result}</p>}
     </div>
   )
 }
@@ -3718,7 +3792,17 @@ function LoadedModelsPopover({
               {meta && <div className="loaded-row-meta">{meta}</div>}
             </div>
             {isActive ? (
-              <span className="loaded-row-badge">Active</span>
+              <div className="loaded-row-actions">
+                <span className="loaded-row-badge">Active</span>
+                <button
+                  className="loaded-row-link"
+                  disabled={busy}
+                  onClick={() => onUnload(m.id)}
+                  title="Free this model's memory, even mid-generation (reloads on the next request)"
+                >
+                  {rowBusy ? '…' : 'Unload'}
+                </button>
+              </div>
             ) : (
               <div className="loaded-row-actions">
                 <button
@@ -3838,6 +3922,20 @@ function Models({
 
   async function cancelDownload(job: DownloadJob): Promise<void> {
     await onCancelDownload(job)
+  }
+
+  async function unload(id: string): Promise<void> {
+    setBusyId(id)
+    setError(null)
+    try {
+      setModels(await window.api.unloadModel(id))
+      onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      refresh()
+    } finally {
+      setBusyId(null)
+    }
   }
 
   async function remove(id: string): Promise<void> {
@@ -3966,6 +4064,7 @@ function Models({
               busy={busyId === m.id}
               download={downloads[m.id]}
               onLoad={() => void load(m.id)}
+              onUnload={() => void unload(m.id)}
               onDownload={() => void download(m.id)}
               onCancelDownload={() => downloads[m.id] && void cancelDownload(downloads[m.id])}
               onDelete={() => void remove(m.id)}
@@ -3982,6 +4081,7 @@ function Models({
                   busy={busyId === m.id}
                   download={downloads[m.id]}
                   onLoad={() => void load(m.id)}
+                  onUnload={() => void unload(m.id)}
                   onDownload={() => void download(m.id)}
                   onCancelDownload={() => downloads[m.id] && void cancelDownload(downloads[m.id])}
                   onDelete={() => void remove(m.id)}
@@ -4004,6 +4104,7 @@ function ModelCard({
   busy,
   download,
   onLoad,
+  onUnload,
   onDownload,
   onCancelDownload,
   onDelete
@@ -4012,6 +4113,7 @@ function ModelCard({
   busy: boolean
   download?: DownloadJob
   onLoad: () => void
+  onUnload: () => void
   onDownload: () => void
   onCancelDownload: () => void
   onDelete: () => void
@@ -4130,6 +4232,20 @@ function ModelCard({
             }
           >
             {busy ? 'Loading…' : model.active ? 'Active' : model.loaded ? 'Use' : 'Load'}
+          </button>
+        )}
+        {model.loaded && !downloading && (
+          <button
+            className="btn-off"
+            disabled={busy}
+            onClick={onUnload}
+            title={
+              model.active
+                ? 'Free this model from server memory, even mid-generation (reloads on the next request)'
+                : "Free this model's memory (stays on disk)"
+            }
+          >
+            Unload
           </button>
         )}
         {/* Uninstall is offered only for models actually on disk. A two-step

@@ -25,6 +25,7 @@ import type {
   AgentEvent,
   ApprovalDecision,
   ChatMessage,
+  ForceStopResult,
   McpServerConfig,
   McpServerState,
   Napkin,
@@ -315,13 +316,18 @@ function createWindow(): void {
   })
   window.webContents.on('render-process-gone', (_event, details) => {
     stopLogFeeds()
+    abortOrphanedTurn(`the renderer process went away (${details.reason})`)
     console.error(`[ui] the renderer process went away (${details.reason})`)
   })
   // React cleanup is not guaranteed on a hard reload. Stop both feeds when the
   // main frame navigates so an abandoned server WebSocket cannot reconnect in
-  // the background with no viewer listening.
+  // the background with no viewer listening. The same reload wipes the chat the
+  // running turn reports to, so that turn is aborted too.
   window.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace) stopLogFeeds()
+    if (isMainFrame && !isInPlace) {
+      stopLogFeeds()
+      abortOrphanedTurn('the window reloaded')
+    }
   })
 
   // Window controls driven by the renderer's custom top bar.
@@ -1074,6 +1080,9 @@ function describeEvent(e: AgentEvent): string {
 }
 
 ipcMain.handle('agent:send', async (event, messages: ChatMessage[]) => {
+  // A turn still registered here has lost its owner (the renderer only sends
+  // when it is idle), so stop it rather than let it run on unseen.
+  if (cancelAgentTurn()) console.warn('[agent] aborted a stale turn before starting a new one')
   const send = (agentEvent: AgentEvent): void => {
     if (!event.sender.isDestroyed()) event.sender.send('agent:event', agentEvent)
   }
@@ -1203,6 +1212,11 @@ ipcMain.handle(
 // in-flight approvals, resolving each as a denial, to unblock the awaited
 // `approve(...)` call so the loop can observe the abort and stop.
 ipcMain.on('agent:cancel', () => {
+  cancelAgentTurn()
+})
+
+function cancelAgentTurn(): boolean {
+  const running = currentAgentAbort !== null
   currentAgentAbort?.abort()
   for (const resolve of pendingApprovals.values()) resolve('deny')
   pendingApprovals.clear()
@@ -1212,6 +1226,46 @@ ipcMain.on('agent:cancel', () => {
   pendingNapkinChoices.clear()
   for (const resolve of pendingPitcherProposals.values()) resolve({ saved: false, name: '' })
   pendingPitcherProposals.clear()
+  for (const resolve of pendingLimits.values()) resolve(false)
+  pendingLimits.clear()
+  return running
+}
+
+// The chat transcript and its Stop button live in the renderer, so a reload or
+// crash leaves a running turn with nobody to report to and no way to stop it
+// (the server keeps generating with the fans spinning). Abort it, and any
+// transcription, when that happens.
+function abortOrphanedTurn(reason: string): void {
+  if (cancelAgentTurn()) console.warn(`[agent] aborted the running turn: ${reason}`)
+  currentTranscribeAbort?.abort()
+}
+
+// Server activity for the "Server online" popover: which loaded models the
+// server reports as busy or streaming, whoever the client is.
+ipcMain.handle('agent:server-activity', () => lemonade.getActivity())
+
+// Force stop from the "Server online" popover. Unlike the composer's Stop
+// button this needs no live conversation: it works after a window reload has
+// wiped the UI state while the turn kept running in this process. Aborts the
+// agent turn, any transcription and running pours, then every chat stream still
+// open on the client, and reports what the server still shows as busy.
+ipcMain.handle('agent:force-stop', async (): Promise<ForceStopResult> => {
+  let aborted = cancelAgentTurn() ? 1 : 0
+  if (currentTranscribeAbort) {
+    currentTranscribeAbort.abort()
+    aborted++
+  }
+  for (const [id, controller] of runningPours) {
+    cancelledPours.add(id)
+    controller.abort()
+    aborted++
+  }
+  aborted += lemonade.abortInference()
+  // Give the backend a moment to notice the dropped sockets before re-reading.
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  const activity = await lemonade.getActivity()
+  console.warn(`[agent] force stop: aborted ${aborted} request(s)`)
+  return { aborted, stillBusy: activity.busy.map((b) => b.model) }
 })
 
 // --- Pitcher: scheduled tasks ------------------------------------------------

@@ -3,7 +3,13 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionTool
 } from 'openai/resources/chat/completions'
-import type { ContextBreakdown, ContextInfo, DownloadJob, ModelInfo } from '@shared/types'
+import type {
+  ContextBreakdown,
+  ContextInfo,
+  DownloadJob,
+  ModelInfo,
+  ServerActivity
+} from '@shared/types'
 import {
   collectionStatus,
   describeCollectionNotReady,
@@ -41,6 +47,8 @@ interface HealthModel {
   max_context_window?: number
   recipe_options?: { ctx_size?: number }
   loaded?: boolean
+  is_busy?: boolean
+  is_streaming?: boolean
 }
 interface HealthResponse {
   model_loaded?: string
@@ -177,6 +185,9 @@ export class LemonadeClient {
   // particular, a slow startup Omni pull must not switch the model back after
   // the user has already selected another model.
   private activeLoad: AbortController | null = null
+  // Controllers of the chat streams currently in flight, so a force stop can
+  // drop their sockets even when the turn that started them has been orphaned.
+  private readonly liveStreams = new Set<AbortController>()
 
   constructor(
     baseURL: string,
@@ -1229,6 +1240,7 @@ export class LemonadeClient {
     // the server stops generating instead of running to completion unheard.
     const onAbort = (): void => stream.controller.abort()
     signal?.addEventListener('abort', onAbort, { once: true })
+    this.liveStreams.add(stream.controller)
     let completed = false
     try {
       const response = await stream.finalChatCompletion()
@@ -1262,6 +1274,45 @@ export class LemonadeClient {
     } finally {
       tracked.end(completed)
       signal?.removeEventListener('abort', onAbort)
+      this.liveStreams.delete(stream.controller)
+    }
+  }
+
+  /**
+   * Force stop: drop every chat stream this app has open so the server stops
+   * generating for them. Returns how many were aborted.
+   */
+  abortInference(): number {
+    const streams = [...this.liveStreams]
+    this.liveStreams.clear()
+    for (const controller of streams) controller.abort()
+    return streams.length
+  }
+
+  /**
+   * What the server is doing right now, from /health: the models it reports as
+   * busy or streaming (whoever the client is). `online` is false when /health
+   * can't be read.
+   */
+  async getActivity(timeoutMs = 3000): Promise<ServerActivity> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await fetch(`${this.baseURL}/health`, {
+        method: 'GET',
+        headers: this.authHeaders(),
+        signal: controller.signal
+      })
+      if (!response.ok) return { online: false, busy: [] }
+      const body = (await response.json()) as HealthResponse
+      const busy = (body.all_models_loaded ?? [])
+        .filter((m) => m.is_busy || m.is_streaming)
+        .map((m) => ({ model: m.model_name ?? 'unknown', type: m.type }))
+      return { online: true, busy }
+    } catch {
+      return { online: false, busy: [] }
+    } finally {
+      clearTimeout(timer)
     }
   }
 
