@@ -4,10 +4,13 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  defaultOptions,
   loadCatalog,
+  optionsForServer,
   readServers,
   serverFromCatalog,
   pathForServer,
+  withServerOptions,
   withServerPath
 } from '../src/main/config'
 import type { CatalogEntry, McpServerConfig } from '@shared/types'
@@ -54,6 +57,78 @@ describe('catalog.json', () => {
       expect(hasPlaceholder, `${entry.id} needsPath but no {{path}} arg`).toBe(true)
       expect(['folder', 'file'], `${entry.id} bad pathKind`).toContain(entry.pathKind)
     }
+  })
+
+  it('options are well-formed and their defaults are valid', () => {
+    for (const entry of catalog) {
+      for (const option of entry.options ?? []) {
+        const defaults = [option.default, ...Object.values(option.defaultByPlatform ?? {})]
+        if (option.type === 'toggle') {
+          expect(option.args?.length, `${entry.id}.${option.id} toggle needs args`).toBeGreaterThan(0)
+          for (const d of defaults) expect(typeof d).toBe('boolean')
+        } else {
+          const values = (option.choices ?? []).map((c) => c.value)
+          expect(values.length, `${entry.id}.${option.id} select needs choices`).toBeGreaterThan(0)
+          for (const d of defaults) expect(values, `${entry.id}.${option.id} default`).toContain(d)
+        }
+      }
+    }
+  })
+})
+
+describe('catalog entry options', () => {
+  const entry: CatalogEntry = {
+    id: 'browser',
+    name: 'Browser',
+    blurb: 'x',
+    category: 'Web',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', 'pkg'],
+    options: [
+      {
+        id: 'browser',
+        label: 'Browser',
+        type: 'select',
+        default: 'chrome',
+        defaultByPlatform: { win32: 'msedge' },
+        choices: [
+          { value: 'chrome', label: 'Chrome', args: ['--browser', 'chrome'] },
+          { value: 'msedge', label: 'Edge', args: ['--browser', 'msedge'] }
+        ]
+      },
+      { id: 'headless', label: 'Headless', type: 'toggle', default: false, args: ['--headless'] }
+    ]
+  }
+  const args = (s: McpServerConfig): string[] => (s.transport === 'stdio' ? (s.args ?? []) : [])
+
+  it('applies platform defaults when none are chosen', () => {
+    expect(defaultOptions(entry, 'win32')).toEqual({ browser: 'msedge', headless: false })
+    expect(defaultOptions(entry, 'darwin')).toEqual({ browser: 'chrome', headless: false })
+  })
+
+  it('writes chosen options into the args and recovers them', () => {
+    const server = serverFromCatalog(entry, undefined, { browser: 'msedge', headless: true })
+    expect(args(server)).toEqual(['-y', 'pkg', '--browser', 'msedge', '--headless'])
+    expect(optionsForServer(entry, server)).toEqual({ browser: 'msedge', headless: true })
+  })
+
+  it('replaces previous option args instead of accumulating them', () => {
+    const server = serverFromCatalog(entry, undefined, { browser: 'msedge', headless: true })
+    const changed = withServerOptions(entry, server, { browser: 'chrome', headless: false })
+    expect(args(changed)).toEqual(['-y', 'pkg', '--browser', 'chrome'])
+    expect(optionsForServer(entry, changed)).toEqual({ browser: 'chrome', headless: false })
+  })
+
+  it('falls back to defaults for a server saved without option args', () => {
+    const saved: McpServerConfig = {
+      id: 'browser',
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', 'pkg'],
+      enabled: true
+    }
+    expect(optionsForServer(entry, saved, 'darwin')).toEqual({ browser: 'chrome', headless: false })
   })
 })
 

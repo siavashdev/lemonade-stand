@@ -93,6 +93,10 @@ Otherwise you can download the server from Lemonade server it self: (https://git
   **Lemonade Server logs** (the server's own live log) or **Lemonade Stand logs**
   (what this app has been doing). Both can be searched, filtered by level and
   copied into a bug report. See the [developer guide](docs/DEVELOPER_GUIDE.md#logs).
+- **Is the model actually working?**
+  Look at the **Monitoring** pill at the left of the status bar for the model's state at a glance, and click it for live graphs of
+  generation speed (tokens/s), CPU, RAM, GPU, GPU memory and NPU. See the
+  [developer guide](docs/DEVELOPER_GUIDE.md#monitor).
 - `TypeError: crypto.hash is not a function`
   Use Node 22.12+ (or newer). This error appears when running with older Node
   versions.

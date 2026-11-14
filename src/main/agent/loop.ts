@@ -11,11 +11,15 @@ import type {
   NapkinChoice,
   PitcherOutput,
   PitcherTrigger,
-  PlanStep
+  PlanStep,
+  Recipe
 } from '@shared/types'
+import { buildRecipeCatalog } from '@shared/recipes'
 import { normalizeTrigger } from '@shared/schedule'
 import type { LemonadeClient } from '../lemonade/client'
+import { parseContextOverflow } from '../lemonade/models'
 import type { McpManager } from '../mcp/manager'
+import { wrapInfluence, type InfluenceChannel } from './influence'
 import { dirname } from 'path'
 
 // Asks the user to approve a single tool call. Resolves true to proceed, false
@@ -143,6 +147,11 @@ const ASK_NAPKIN_TOOL = 'ask_napkin'
 // it's only offered to interactive turns (see `run`).
 const CREATE_PITCHER_TOOL = 'create_pitcher'
 
+// Built-in tool that loads a saved recipe's full instructions on demand. Only
+// the recipes' names/descriptions sit in the system prompt (see `run`), so a
+// long library costs almost nothing until the model actually needs one.
+const USE_RECIPE_TOOL = 'use_recipe'
+
 // Every tool handled in-process rather than dispatched to an MCP server. Used to
 // separate real (task-advancing) tool calls from the built-ins when deciding
 // whether to force a planning round-trip.
@@ -150,8 +159,26 @@ const BUILTIN_TOOLS = new Set([
   PLAN_TOOL,
   SHOW_NAPKIN_TOOL,
   ASK_NAPKIN_TOOL,
-  CREATE_PITCHER_TOOL
+  CREATE_PITCHER_TOOL,
+  USE_RECIPE_TOOL
 ])
+
+const USE_RECIPE_TOOL_DEF: ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: USE_RECIPE_TOOL,
+    description:
+      'Load the full step-by-step instructions of a saved recipe. Call this FIRST when the ' +
+      "user's task matches one of the available recipes, then follow the instructions it returns.",
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The recipe id exactly as listed in the system prompt.' }
+      },
+      required: ['id']
+    }
+  }
+}
 
 // Schema for `show_napkin`: lets the model display a rich artifact in the side
 // panel to enrich a reply beyond plain text. Raw HTML / live browsing is
@@ -496,8 +523,16 @@ export class Agent {
     private systemPrompt: string,
     /** Fraction (0-1) of the usable context budget at which older messages are
      * summarized to free room. 0 disables auto-compaction. */
-    private compactThreshold = 0.9
+    private compactThreshold = 0.9,
+    /** Supplies the saved recipes fresh each turn, so edits apply without a restart. */
+    private getRecipes: () => Recipe[] = () => []
   ) {}
+
+  /** The system prompt plus, when any recipes are enabled, their catalogue. */
+  fullSystemPrompt(): string {
+    const catalog = buildRecipeCatalog(this.getRecipes())
+    return catalog ? `${this.systemPrompt}\n\n${catalog}` : this.systemPrompt
+  }
 
   async run(
     history: ChatMessage[],
@@ -506,7 +541,8 @@ export class Agent {
     signal?: AbortSignal,
     onLimit?: ContinueFn,
     askNapkin?: AskNapkinFn,
-    proposePitcher?: ProposePitcherFn
+    proposePitcher?: ProposePitcherFn,
+    influence?: InfluenceChannel
   ): Promise<void> {
     const messages = history as ChatCompletionMessageParam[]
     // Expose the MCP tools plus the built-in planning + napkin tools for this turn.
@@ -516,6 +552,9 @@ export class Agent {
       SHOW_NAPKIN_TOOL_DEF,
       ASK_NAPKIN_TOOL_DEF
     ]
+    // Only offer use_recipe when there is a recipe to load.
+    const systemPrompt = this.fullSystemPrompt()
+    if (this.getRecipes().some((r) => r.enabled)) tools.push(USE_RECIPE_TOOL_DEF)
     // Only an interactive turn (proposePitcher present) may propose scheduled
     // tasks. A headless pour never gets the tool, so a scheduled task can't
     // create or steer other scheduled tasks (no privilege escalation).
@@ -523,8 +562,8 @@ export class Agent {
 
     // Prime the model to actually call tools rather than describe them. Only
     // inject if the caller hasn't already supplied a system message.
-    if (this.systemPrompt && !messages.some((m) => m.role === 'system')) {
-      messages.unshift({ role: 'system', content: this.systemPrompt })
+    if (systemPrompt && !messages.some((m) => m.role === 'system')) {
+      messages.unshift({ role: 'system', content: systemPrompt })
     }
 
     try {
@@ -551,6 +590,9 @@ export class Agent {
           emit({ type: 'done' })
           return
         }
+        // Fold in anything the user typed while the agent was working, so the
+        // next model call sees the new direction.
+        if (this.applyInfluences(messages, emit, influence)) finishNudges = 0
         // Keep long conversations inside the context window by summarizing the
         // older messages before they overflow. Runs each iteration so a turn
         // that balloons via tool output is also caught. The current plan is
@@ -589,9 +631,26 @@ export class Agent {
           })
         }
 
-        const choice = await this.lemonade.chat(messages, tools, signal, (delta) =>
-          emit({ type: 'reasoning_delta', text: delta })
-        )
+        let choice: Awaited<ReturnType<LemonadeClient['chat']>>
+        try {
+          choice = await this.chatWithOverflowRetry(
+            messages,
+            tools,
+            emit,
+            signal,
+            currentPlan,
+            influence
+          )
+        } catch (err) {
+          // An interrupt aborted just this completion: drop its partial reply
+          // and go around again so the influence is injected. A real Stop (the run
+          // signal) or any other failure still ends the turn below.
+          if (!signal?.aborted && influence?.consumeInterrupt()) {
+            emit({ type: 'completion_interrupted' })
+            continue
+          }
+          throw err
+        }
         const message = choice.message
         const toolCalls = message.tool_calls ?? []
         // Split off the chain-of-thought once, right after the completion and
@@ -608,7 +667,11 @@ export class Agent {
         // muddled its state), nudge it to keep going instead of ending.
         if (toolCalls.length === 0) {
           const unfinished = currentPlan.filter((s) => s.status !== 'completed')
-          if (unfinished.length > 0 && finishNudges < MAX_PLAN_FINISH_NUDGES) {
+          if (
+            unfinished.length > 0 &&
+            finishNudges < MAX_PLAN_FINISH_NUDGES &&
+            !influence?.hasPending()
+          ) {
             finishNudges++
             messages.push({
               role: 'user',
@@ -627,6 +690,12 @@ export class Agent {
           // the chat shows a clean message rather than a giant data: URL.
           const { cleaned, napkins } = extractInlineImages(content)
           for (const napkin of napkins) emit({ type: 'napkin_show', napkin })
+          // The user sent an influence while this answer was being written: show the
+          // answer, but keep the turn going so the influence gets acted on.
+          if (influence?.hasPending()) {
+            if (cleaned.trim()) emit({ type: 'assistant_text', text: cleaned })
+            continue
+          }
           emit({ type: 'assistant_text', text: cleaned })
           emit({ type: 'done' })
           return
@@ -770,6 +839,71 @@ export class Agent {
   }
 
   /**
+   * One chat completion that survives the server rejecting an over-long prompt.
+   * The token estimate is approximate, so a request can pass the pre-flight check
+   * and still be refused ("request (N tokens) exceeds the available context size").
+   * On that error, force a compaction and retry once. If there is nothing safe to
+   * fold, or the retry fails too, the error propagates.
+   */
+  private async chatWithOverflowRetry(
+    messages: ChatCompletionMessageParam[],
+    tools: ChatCompletionTool[],
+    emit: (event: AgentEvent) => void,
+    signal: AbortSignal | undefined,
+    plan: PlanStep[],
+    influence?: InfluenceChannel
+  ): ReturnType<LemonadeClient['chat']> {
+    // Each completion gets its own controller so an interrupt can abort just
+    // this call without ending the turn.
+    const send = async (): ReturnType<LemonadeClient['chat']> => {
+      const controller = new AbortController()
+      influence?.bindCompletion(controller)
+      const callSignal = !influence
+        ? signal
+        : signal
+          ? AbortSignal.any([signal, controller.signal])
+          : controller.signal
+      try {
+        return await this.lemonade.chat(messages, tools, callSignal, (delta) =>
+          emit({ type: 'reasoning_delta', text: delta })
+        )
+      } finally {
+        influence?.bindCompletion(null)
+      }
+    }
+    try {
+      return await send()
+    } catch (err) {
+      const text = err instanceof Error ? err.message : String(err)
+      if (signal?.aborted || !parseContextOverflow(text)) throw err
+      if (!(await this.compactMessages(messages, signal, plan))) throw err
+      emit({ type: 'history_compacted', messages: messages as ChatMessage[] })
+      return send()
+    }
+  }
+
+  /**
+   * Inject queued influences as user messages. Returns whether any were applied.
+   * Safe at the top of an iteration: every earlier tool call already has its
+   * result, so the new user message never splits a tool_calls/tool pair.
+   */
+  private applyInfluences(
+    messages: ChatCompletionMessageParam[],
+    emit: (event: AgentEvent) => void,
+    influence?: InfluenceChannel
+  ): boolean {
+    const items = influence?.drain() ?? []
+    for (const item of items) {
+      messages.push({
+        role: 'user',
+        content: wrapInfluence(item.content)
+      } as ChatCompletionMessageParam)
+      emit({ type: 'influence_applied', id: item.id })
+    }
+    return items.length > 0
+  }
+
+  /**
    * Force a compaction pass regardless of the budget threshold, for the UI's
    * manual "Compact Conversation" button. Returns the new model-facing history
    * when it summarized, or null when there was nothing safe to fold (so the
@@ -866,7 +1000,11 @@ export class Agent {
     emit: (event: AgentEvent) => void
   ): Promise<void> {
     try {
-      const breakdown = await this.lemonade.contextBreakdown(messages, tools, this.systemPrompt)
+      const breakdown = await this.lemonade.contextBreakdown(
+        messages,
+        tools,
+        this.fullSystemPrompt()
+      )
       emit({ type: 'context_usage', breakdown })
     } catch {
       // Non-fatal: the badge simply won't update on this iteration.
@@ -1080,6 +1218,35 @@ export class Agent {
         tool_call_id: call.id,
         content: `The user selected: ${picked ? picked.label : chosen}. Continue based on this choice.`
       })
+      return
+    }
+
+    // `use_recipe`: return a saved recipe's instructions. In-process and
+    // read-only, so no approval. An unknown/disabled id lists the valid ones so
+    // a model that guessed can retry correctly.
+    if (qualified === USE_RECIPE_TOOL) {
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      const enabled = this.getRecipes().filter((r) => r.enabled)
+      const recipe = enabled.find((r) => r.id === id)
+      if (recipe) {
+        emit({ type: 'recipe_used', id: recipe.id, name: recipe.name })
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content:
+            `Recipe "${recipe.name}". Follow these instructions to complete the user's task:\n\n` +
+            recipe.body
+        })
+      } else {
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content:
+            `No enabled recipe with id "${id}". Available ids: ` +
+            (enabled.map((r) => r.id).join(', ') || '(none)') +
+            '. Continue without it if none apply.'
+        })
+      }
       return
     }
 

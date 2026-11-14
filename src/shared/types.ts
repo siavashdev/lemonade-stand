@@ -152,6 +152,30 @@ export interface CatalogEntry {
   pathLabel?: string
   /** Upstream docs link. */
   homepage?: string
+  /** User-adjustable settings shown on the Pantry card. Each one maps to extra
+   * launcher args appended to the server's `args`. */
+  options?: CatalogOption[]
+}
+
+/** A user-selected value for each of a catalog entry's options, keyed by
+ * option id: the chosen choice `value` for a select, a boolean for a toggle. */
+export type OptionValues = Record<string, string | boolean>
+
+/** One user-adjustable setting on a catalog entry. */
+export interface CatalogOption {
+  id: string
+  label: string
+  /** Help text shown under the control. */
+  hint?: string
+  type: 'select' | 'toggle'
+  /** `select` only: the mutually exclusive choices. */
+  choices?: { value: string; label: string; hint?: string; args: string[] }[]
+  /** `toggle` only: args added while the toggle is on. */
+  args?: string[]
+  /** Initial value: a choice `value` for a select, a boolean for a toggle. */
+  default: string | boolean
+  /** Overrides `default` per `process.platform` (e.g. `win32`). */
+  defaultByPlatform?: Record<string, string | boolean>
 }
 
 /** Effective context-window budget for the current chat model, surfaced so the
@@ -268,6 +292,8 @@ export interface McpServerState {
   toolCount: number
   /** For path-based stdio servers, the folder/file currently configured. */
   path?: string
+  /** For servers whose catalog entry has options, the values currently in use. */
+  options?: OptionValues
   /** Populated when the last connection attempt failed. */
   error?: string
 }
@@ -281,7 +307,7 @@ export type ApprovalDecision = 'approve' | 'deny' | 'always'
  * restored exactly as it looked, not just as the model saw it. Kept here so both
  * processes can persist/round-trip it. */
 export type TranscriptEntry =
-  | { kind: 'user'; text: string; attachments?: MessageAttachment[] }
+  | { kind: 'user'; text: string; attachments?: MessageAttachment[]; recipes?: string[] }
   | { kind: 'assistant'; text: string }
   // The model's chain-of-thought, shown as a live-streaming block that collapses
   // to a one-line summary once the turn moves on. Kept in the visual transcript
@@ -320,6 +346,21 @@ export interface StoredSession extends SessionSummary {
   summary?: string
 }
 
+/** A saved, reusable procedure ("recipe", SKILL.md-style) the agent can follow
+ * to resolve a repeatable task faster. Stored as `recipes/<id>/SKILL.md`. */
+export interface Recipe {
+  /** Stable kebab-case id, also the folder name. */
+  id: string
+  name: string
+  /** One-line summary of what it does and when to use it. This is all the model
+   * sees until it decides to load the recipe, so it should say when it applies. */
+  description: string
+  /** The markdown instructions. */
+  body: string
+  /** Disabled recipes are kept but hidden from the model. */
+  enabled: boolean
+}
+
 /** How a Pitcher fires. `on-open` runs once per app launch; `daily`, `weekly`
  * and `monthly` run at a local "HH:MM" (and catch up on launch if the most recent
  * fire was missed while the app was closed); `interval` repeats every N minutes
@@ -349,6 +390,9 @@ export interface Pitcher {
    * pour. Anything not listed is denied, so a scheduled task never gets a blank
    * cheque to run tools it wasn't explicitly granted. */
   allowedTools: string[]
+  /** Ids of recipes whose instructions are included in every pour, so a
+   * scheduled run follows the same procedure each time. */
+  recipes?: string[]
   /** Epoch ms of the last successful pour, for catch-up on launch. */
   lastRunAt?: number
   /** Epoch ms of the last user-initiated Stop. Like `lastRunAt`, it marks a
@@ -411,6 +455,8 @@ export type AgentEvent =
   | { type: 'reasoning'; text: string }
   | { type: 'tool_call'; server: string; tool: string; args: unknown }
   | { type: 'tool_result'; server: string; tool: string; ok: boolean; preview: string }
+  // The model loaded a recipe via the built-in `use_recipe` tool.
+  | { type: 'recipe_used'; id: string; name: string }
   // The model created or revised its working plan via the built-in `update_plan`
   // tool. `steps` is the full, current checklist the renderer should display.
   | { type: 'plan_updated'; steps: PlanStep[] }
@@ -451,6 +497,12 @@ export type AgentEvent =
   // window. `messages` is the new, compacted model-facing history the renderer
   // should adopt in place of what it sent.
   | { type: 'history_compacted'; messages: ChatMessage[] }
+  // A queued influence (see RendererApi.influenceMessage) was injected into the turn.
+  // The renderer moves it from its queue into the transcript at this point.
+  | { type: 'influence_applied'; id: string }
+  // The in-flight model completion was aborted by an interrupt. Its partial
+  // reply is discarded; the renderer should settle any live reasoning preview.
+  | { type: 'completion_interrupted' }
   | { type: 'error'; message: string }
   | { type: 'done' }
 
@@ -482,6 +534,54 @@ export type ServerLogEvent =
   // One new line, as the server emits it.
   | { type: 'entry'; entry: LogEntry }
 
+/** Host resource usage from the server's `/system-stats`. Any field is null when
+ * the server (or the machine's drivers) doesn't report it. */
+export interface SystemStats {
+  cpuPercent: number | null
+  /** System RAM in use, GiB. */
+  memoryGb: number | null
+  gpuPercent: number | null
+  /** GPU memory in use, GiB (shared system memory on APUs). */
+  vramGb: number | null
+  /** Total memory of the primary GPU, GiB, when known. */
+  vramTotalGb: number | null
+  gpuName: string | null
+  npuPercent: number | null
+}
+
+/** Inference activity from the server's `/stats`: the most recent request plus
+ * counters since the server started, and what is streaming right now. */
+export interface InferenceStats {
+  /** Generation speed of the last request (tokens/s). */
+  tokensPerSecond: number | null
+  /** Time to first token of the last request, seconds. */
+  timeToFirstToken: number | null
+  inputTokens: number | null
+  outputTokens: number | null
+  promptTokens: number | null
+  cacheTokens: number | null
+  requestCountTotal: number | null
+  inputTokensTotal: number | null
+  outputTokensTotal: number | null
+  /** Streams producing output in the last few seconds. */
+  activeRequests: number | null
+  /** Estimated combined generation rate of those streams (tokens/s). */
+  liveTokensPerSecond: number | null
+  /** The last-request figures are this app's own estimates, because the server
+   * doesn't keep statistics for that kind of request (Omni collections). */
+  estimated: boolean
+}
+
+/** One poll of the server's monitoring endpoints. `online` is false when
+ * neither answered; a null half means just that endpoint isn't available. */
+export interface MonitorSample {
+  /** Wall-clock time of the poll, ms since the epoch. */
+  time: number
+  online: boolean
+  system: SystemStats | null
+  inference: InferenceStats | null
+}
+
 /** The app's own retained log lines, plus the on-disk log file when file
  * logging is enabled (LOG_LEVEL=debug), so the viewer can reveal it. */
 export interface AppLogsSnapshot {
@@ -494,9 +594,16 @@ export interface RendererApi {
   /** Verbose diagnostic logging flag (LOG_LEVEL=debug), for renderer-side
    * console tracing. Read synchronously at startup. */
   debug: boolean
+  /** The OS the app runs on (`process.platform`), for platform-specific defaults. */
+  platform: string
   sendMessage(messages: ChatMessage[]): Promise<void>
   /** Halt the in-flight agent turn started by `sendMessage`. */
   cancelMessage(): void
+  /** Send an influence into the running turn to change its direction. It is applied
+   * at the agent's next step; with `interrupt` the in-flight model completion is
+   * also aborted so it applies immediately. Resolves false when no turn is
+   * running (the message was not accepted). */
+  influenceMessage(id: string, content: ChatMessage['content'], interrupt: boolean): Promise<boolean>
   /** Resolve the absolute filesystem path of a dropped/pasted `File`, so items
    * dragged from the OS can be handed to the agent's filesystem tools. Returns
    * an empty string when the file has no on-disk path (e.g. pasted image data). */
@@ -512,11 +619,11 @@ export interface RendererApi {
   onServersChanged(handler: () => void): () => void
   /** Answer a pending `tool_approval_request`. */
   respondApproval(id: string, decision: ApprovalDecision): void
-  /** Turn the session-scoped approval bypass on or off. While on, tool calls
-   * are approved without prompting. Scoped to the current conversation: the
-   * renderer resets it to false whenever a new session starts, so it never
-   * outlives the session and a fresh session falls back to the default
-   * (env/settings.json) approval behavior. */
+  /** Turn "Allow all" on or off. While on, every tool call (including each
+   * sub-tool of a multi-tool server) is approved, and the agent keeps going
+   * past its step limit, without prompting. The renderer owns the persisted
+   * choice and re-sends it on startup; false restores the
+   * default (env/settings.json) approval behavior. */
   setBypassApprovals(enabled: boolean): void
   /** Answer a pending `step_limit_request`: true to let the agent keep going
    * for another budget, false to stop it. */
@@ -589,7 +696,10 @@ export interface RendererApi {
   listServers(): Promise<McpServerState[]>
   /** Enable/disable a tool (adding it from the catalogue if new). Returns the
    * refreshed server states after reconnecting. */
-  configureServer(id: string, opts: { enabled: boolean; path?: string }): Promise<McpServerState[]>
+  configureServer(
+    id: string,
+    opts: { enabled: boolean; path?: string; options?: OptionValues }
+  ): Promise<McpServerState[]>
   /** Remove a configured server entirely. Returns refreshed states. */
   removeServer(id: string): Promise<McpServerState[]>
   /** Open a native picker so the user can choose a folder or file path. */
@@ -621,6 +731,20 @@ export interface RendererApi {
   cancelPitcher(id: string): Promise<void>
   /** Subscribe to Pitcher run-state events. Returns an unsubscribe function. */
   onPitcherEvent(handler: (event: PitcherEvent) => void): () => void
+  /** List saved recipes (with bodies), enabled or not. */
+  listRecipes(): Promise<Recipe[]>
+  /** Create or update a recipe. A recipe without an `id` gets a fresh one.
+   * Returns the refreshed list, or throws when the content is invalid. */
+  saveRecipe(recipe: Omit<Recipe, 'id'> & { id?: string }): Promise<Recipe[]>
+  /** Delete a recipe. Returns the refreshed list. */
+  deleteRecipe(id: string): Promise<Recipe[]>
+  /** Enable or disable a recipe without deleting it. Returns the refreshed list. */
+  setRecipeEnabled(id: string, enabled: boolean): Promise<Recipe[]>
+  /** Pick one or more markdown files and import them as recipes. Returns the
+   * refreshed list plus per-file problems; null when the picker was cancelled. */
+  importRecipes(): Promise<{ recipes: Recipe[]; imported: number; errors: string[] } | null>
+  /** Save a recipe as a SKILL.md file via a native save dialog. */
+  exportRecipe(id: string): Promise<boolean>
   /** Minimize the window. */
   minimizeWindow(): void
   /** Toggle between maximized and restored. */
@@ -643,4 +767,13 @@ export interface RendererApi {
    * status event, the server's backlog, then each new line. The returned
    * function closes the stream. */
   onServerLog(handler: (event: ServerLogEvent) => void): () => void
+  /** Poll the Lemonade server's resource and inference statistics about once a
+   * second while subscribed. The returned function stops the polling. */
+  onMonitorSample(handler: (sample: MonitorSample) => void): () => void
+  /** Open Monitoring in its own window that can be moved outside the main one,
+   * or bring it forward if it's already open. */
+  popOutMonitor(position?: { x: number; y: number }): Promise<void>
+  /** Bring the detached Monitoring window forward. Resolves false when it isn't
+   * open, so the caller can show the in-app overlay instead. */
+  focusMonitorWindow(): Promise<boolean>
 }

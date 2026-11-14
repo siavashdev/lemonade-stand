@@ -15,6 +15,7 @@ import {
   type CollectionStatus,
   type ModelsEntry
 } from './models'
+import { InferenceTracker } from './inference'
 // Fallback context window used only when no override is configured and the
 // server can't be reached to report the loaded model's runtime context.
 const DEFAULT_CONTEXT_SIZE = 4096
@@ -113,6 +114,24 @@ function stripImageContent(message: ChatCompletionMessageParam): ChatCompletionM
   return { ...message, content } as ChatCompletionMessageParam
 }
 
+// Many chat templates (Qwen3.x and others) raise "System message must be at the
+// beginning" unless there is at most one system message and it comes first.
+// Compaction pins a summary and plan as extra system messages, so fold every
+// system message into a single leading one before the request goes out.
+export function mergeSystemMessages(
+  messages: ChatCompletionMessageParam[]
+): ChatCompletionMessageParam[] {
+  const system = messages.filter((m) => m.role === 'system')
+  if (system.length === 0 || (system.length === 1 && messages[0].role === 'system')) return messages
+  const text = (m: ChatCompletionMessageParam): string =>
+    typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '')
+  const merged: ChatCompletionMessageParam = {
+    role: 'system',
+    content: system.map(text).join('\n\n')
+  }
+  return [merged, ...messages.filter((m) => m.role !== 'system')]
+}
+
 // Thin wrapper over the OpenAI SDK pointed at a running lemond. Lemonade
 // implements the OpenAI-compatible surface under /api/v1, so the stock SDK
 // works unchanged; we only supply baseURL + (optional) apiKey.
@@ -148,6 +167,8 @@ export class LemonadeClient {
   // them to a text-only model, which would otherwise 500 with "image input is
   // not supported" and abort the whole turn.
   private visionCapable = new Map<string, boolean>()
+  /** The chat requests this app makes, reported to the Monitoring view. */
+  readonly inference = new InferenceTracker()
   // Context size to request when the user switches models. This starts with the
   // saved setting and follows successful context edits, while budgeting itself
   // still uses the server's runtime value after a load.
@@ -728,7 +749,7 @@ export class LemonadeClient {
 
   /** GET `path` (relative to the base URL) as JSON, or null on any failure
    * (unreachable, timed out, non-2xx, or not JSON). */
-  private async getJson<T>(
+  async getJson<T>(
     path: string,
     timeoutMs: number,
     signal?: AbortSignal
@@ -1151,11 +1172,12 @@ export class LemonadeClient {
     // any message carries an image and the loaded model can't see images, strip
     // the image parts and leave a note so the request stays valid and the model
     // can explain the limitation instead of the request failing outright.
-    const outgoing = messagesHaveImages(messages)
+    const normalized = mergeSystemMessages(messages)
+    const outgoing = messagesHaveImages(normalized)
       ? (await this.modelSupportsVision(this.model))
-        ? messages
-        : messages.map(stripImageContent)
-      : messages
+        ? normalized
+        : normalized.map(stripImageContent)
+      : normalized
     const stream = this.client.chat.completions.stream(
       {
         model: this.model,
@@ -1169,6 +1191,13 @@ export class LemonadeClient {
       },
       { signal }
     )
+    // Report the request to the Monitoring view. An Omni collection is run by
+    // the server's own loop, which doesn't update its /stats, so only those are
+    // counted here; the rest just feed the "generating" state and live rate.
+    const tracked = this.inference.begin(
+      !this.collectionKinds.get(this.model),
+      JSON.stringify(outgoing)
+    )
     // Accumulate the model's chain-of-thought ourselves. Reasoning models served
     // by llama.cpp / OGA (e.g. Qwen3) stream their thinking in a non-standard
     // `reasoning_content` (or `reasoning`) delta field. The OpenAI SDK's stream
@@ -1180,13 +1209,19 @@ export class LemonadeClient {
     let reasoning = ''
     stream.on('chunk', (chunk) => {
       const delta = chunk.choices[0]?.delta as
-        | { reasoning_content?: unknown; reasoning?: unknown }
+        | { content?: unknown; reasoning_content?: unknown; reasoning?: unknown }
         | undefined
+      if (typeof delta?.content === 'string') tracked.text(delta.content)
+      for (const call of chunk.choices[0]?.delta?.tool_calls ?? []) {
+        tracked.text(`${call.function?.name ?? ''}${call.function?.arguments ?? ''}`)
+      }
       if (typeof delta?.reasoning_content === 'string') {
         reasoning += delta.reasoning_content
+        tracked.text(delta.reasoning_content)
         onReasoning?.(delta.reasoning_content)
       } else if (typeof delta?.reasoning === 'string') {
         reasoning += delta.reasoning
+        tracked.text(delta.reasoning)
         onReasoning?.(delta.reasoning)
       }
     })
@@ -1194,8 +1229,10 @@ export class LemonadeClient {
     // the server stops generating instead of running to completion unheard.
     const onAbort = (): void => stream.controller.abort()
     signal?.addEventListener('abort', onAbort, { once: true })
+    let completed = false
     try {
       const response = await stream.finalChatCompletion()
+      completed = true
       const choice = response.choices[0]
       if (!choice) throw new Error('lemond returned no choices')
       // An Omni collection reports its failures as the assistant's own reply
@@ -1214,7 +1251,16 @@ export class LemonadeClient {
         ;(choice.message as { reasoning_content?: string }).reasoning_content = reasoning
       }
       return choice
+    } catch (err) {
+      const overflow = parseContextOverflow(err instanceof Error ? err.message : String(err))
+      if (overflow) {
+        // Believe the server's real window so later budget checks compact in time.
+        this.cachedServerContext = overflow.available
+        this.contextOverride = undefined
+      }
+      throw err
     } finally {
+      tracked.end(completed)
       signal?.removeEventListener('abort', onAbort)
     }
   }

@@ -4,6 +4,8 @@ import type {
   ApprovalDecision,
   ChatMessage,
   LogEntry,
+  MonitorSample,
+  OptionValues,
   PitcherEvent,
   RendererApi,
   ServerLogEvent
@@ -17,12 +19,19 @@ const api: RendererApi = {
   // additionalArguments, so the renderer knows the debug flag synchronously.
   debug: process.argv.some((a) => a === '--app-debug=1'),
 
+  // The OS the app runs on, so the Pantry can show platform-specific defaults.
+  platform: process.platform,
+
   sendMessage(messages: ChatMessage[]): Promise<void> {
     return ipcRenderer.invoke('agent:send', messages)
   },
 
   cancelMessage(): void {
     ipcRenderer.send('agent:cancel')
+  },
+
+  influenceMessage(id, content, interrupt): Promise<boolean> {
+    return ipcRenderer.invoke('agent:influence', id, content, interrupt)
   },
 
   getPathForFile(file: File): string {
@@ -161,7 +170,10 @@ const api: RendererApi = {
     return ipcRenderer.invoke('servers:list')
   },
 
-  configureServer(id: string, opts: { enabled: boolean; path?: string }) {
+  configureServer(
+    id: string,
+    opts: { enabled: boolean; path?: string; options?: OptionValues }
+  ) {
     return ipcRenderer.invoke('servers:configure', id, opts)
   },
 
@@ -227,6 +239,30 @@ const api: RendererApi = {
     return () => ipcRenderer.removeListener('pitcher:event', listener)
   },
 
+  listRecipes() {
+    return ipcRenderer.invoke('recipe:list')
+  },
+
+  saveRecipe(recipe) {
+    return ipcRenderer.invoke('recipe:save', recipe)
+  },
+
+  deleteRecipe(id: string) {
+    return ipcRenderer.invoke('recipe:delete', id)
+  },
+
+  setRecipeEnabled(id: string, enabled: boolean) {
+    return ipcRenderer.invoke('recipe:set-enabled', id, enabled)
+  },
+
+  importRecipes() {
+    return ipcRenderer.invoke('recipe:import')
+  },
+
+  exportRecipe(id: string) {
+    return ipcRenderer.invoke('recipe:export', id)
+  },
+
   minimizeWindow(): void {
     ipcRenderer.send('window:minimize')
   },
@@ -272,6 +308,25 @@ const api: RendererApi = {
       ipcRenderer.removeListener('logs:server-event', listener)
       ipcRenderer.send('logs:server-unsubscribe')
     }
+  },
+
+  onMonitorSample(handler: (sample: MonitorSample) => void): () => void {
+    const listener = (_event: unknown, payload: MonitorSample): void => handler(payload)
+    ipcRenderer.on('monitor:sample', listener)
+    // Polling only runs while the Monitor is open.
+    ipcRenderer.send('monitor:subscribe')
+    return () => {
+      ipcRenderer.removeListener('monitor:sample', listener)
+      ipcRenderer.send('monitor:unsubscribe')
+    }
+  },
+
+  popOutMonitor(position?: { x: number; y: number }): Promise<void> {
+    return ipcRenderer.invoke('monitor:pop-out', position)
+  },
+
+  focusMonitorWindow(): Promise<boolean> {
+    return ipcRenderer.invoke('monitor:focus-window')
   }
 }
 
