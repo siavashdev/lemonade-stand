@@ -10,7 +10,7 @@ import {
   pathForServer,
   withServerPath
 } from '../src/main/config'
-import type { CatalogEntry } from '@shared/types'
+import type { CatalogEntry, McpServerConfig } from '@shared/types'
 
 // The repo root — config files (catalog.json / servers.json) live under it.
 const ROOT = resolve(__dirname, '..')
@@ -189,5 +189,33 @@ describe('pathForServer / withServerPath round-trip', () => {
     const server = serverFromCatalog(entry, '/tmp/first')
     const moved = withServerPath(entry, server, '/tmp/second')
     expect(pathForServer(entry, moved)).toBe('/tmp/second')
+  })
+
+  it('finds the path for a server saved before its entry gained leading launcher args', () => {
+    // The catalog now launches sqlite as `uvx --with mcp<2 mcp-server-sqlite ...`,
+    // but servers.json entries seeded by older builds keep the shorter layout.
+    const sqlite: CatalogEntry = {
+      id: 'sqlite',
+      name: 'SQLite',
+      blurb: 'x',
+      category: 'Data',
+      transport: 'stdio',
+      command: 'uvx',
+      args: ['--with', 'mcp<2', 'mcp-server-sqlite', '--db-path', '{{path}}'],
+      needsPath: true,
+      pathKind: 'file'
+    }
+    const saved: McpServerConfig = {
+      id: 'sqlite',
+      transport: 'stdio',
+      command: 'uvx',
+      args: ['mcp-server-sqlite', '--db-path', '/tmp/old.db'],
+      enabled: true
+    }
+    expect(pathForServer(sqlite, saved)).toBe('/tmp/old.db')
+    // Rewriting must replace that arg in place, not append past the end.
+    expect(withServerPath(sqlite, saved, '/tmp/new.db')).toMatchObject({
+      args: ['mcp-server-sqlite', '--db-path', '/tmp/new.db']
+    })
   })
 })

@@ -61,7 +61,10 @@ d('sqlite MCP server (integration, uvx)', () => {
       id: 'sqlite',
       transport: 'stdio',
       command: UVX,
-      args: ['mcp-server-sqlite', '--db-path', join(dir, 'stand.db')],
+      // Keep in sync with the sqlite entry in config/catalog.json. The archived
+      // server crashes on start under the MCP Python SDK 2.x that uvx resolves
+      // by default, hence the `mcp<2` pin.
+      args: ['--with', 'mcp<2', 'mcp-server-sqlite', '--db-path', join(dir, 'stand.db')],
       enabled: true
     })
   })
@@ -132,10 +135,15 @@ d('fetch MCP server (integration, uvx, network)', () => {
   it('fetches a URL and returns page content as markdown', async () => {
     expect(manager.getTools().map((t) => t.qualifiedName)).toContain('fetch__fetch')
     const result = await manager.callTool('fetch__fetch', { url: 'https://example.com' })
-    // The server prefixes the response with the URL, so example.com is always
-    // present. iana.org is the stable IANA link in the page body, regardless of
-    // how mcp-server-fetch renders the page heading.
-    expect(result.text.toLowerCase()).toContain('example.com')
-    expect(result.text.toLowerCase()).toContain('iana.org')
+    // Assert only on what example.com keeps stable. The server prefixes the
+    // response with the URL and includes the page title ("Example Domain"). How
+    // the title is rendered depends on the extractor (a `# ` heading under
+    // Readability.js, plain text under the Python fallback used when Node/npm
+    // can't start, e.g. on Windows), so match the text, not the markup. The body
+    // is NOT stable either: the page has dropped its iana.org link and reworded
+    // its copy before.
+    const text = result.text.toLowerCase()
+    expect(text).toContain('example.com')
+    expect(text).toContain('example domain')
   })
 })
