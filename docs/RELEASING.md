@@ -143,6 +143,14 @@ git push origin v0.2.1
 
 Finally cherry pick hotfix commits to main
 
+## Releasing with Copilot
+
+The steps above are also packaged for GitHub Copilot, so a release can be cut with one request:
+
+- **Agent** [`Release Manager`](../.github/agents/release-manager.agent.md): select it in the agent picker and ask, for example, `Release 0.13.0`, `Release the current branch`, or `Prepare release 0.13.0 but don't push`. It bumps the version, writes `releases/v0.13.0.md`, runs the gate, merges the release branch into `main`, then tags and pushes `v0.13.0` to start the pipeline. It asks for one go-ahead before pushing, and it stops once the pipeline has started instead of waiting for it.
+- **Skill** [`create-release`](../.github/skills/create-release/SKILL.md): the same procedure as a checklist any Copilot agent can follow. Use `/create-release` in chat, or just ask for a release.
+
+The skill is derived from this guide. If you change the release process here, update the skill to match.
 
 ## Local packaging (no release)
 

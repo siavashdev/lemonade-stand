@@ -205,7 +205,28 @@ file**. Requires `uvx`.
   [uv](https://github.com/astral-sh/uv). Make sure the relevant one is installed
   and on your PATH, then restart the app.
 - **Nothing happens / server won't start.** The first run of an `npx`/`uvx`
-  server downloads it, which can take a moment. Check the app logs for errors.
+  server downloads it, which can take a moment. Check the app's logs for errors
+  (see *Viewing logs* below).
+- **An Omni model says it isn't downloaded (or is missing components).** An
+  Omni model is a bundle of several models, and every one of them has to be on
+  the Lemonade server before it can chat. Open **Models** and download it; the
+  status bar shows the progress, and you can try again when it finishes.
+- **"This request needs about N tokens but the model is running with only a
+  4,096-token context."** The server loaded the model with a small context
+  window. Raise it from the context button in the status bar, or start a new
+  session.
 - **Confirm what's loaded.** Ask the agent *"What tools do you have?"* at any
   time.
+
+### Viewing logs
+
+Click the hamburger button (☰) next to **Lemonade Stand** in the top bar:
+
+- **Lemonade Server logs** is the Lemonade server's own live log: model loads,
+  downloads, and any error it hit while answering.
+- **Lemonade Stand logs** is what this app has been doing: tool connections,
+  agent errors, and the window's console.
+
+In either one you can search, filter by level, pause scrolling with **Follow**,
+and **Copy** the lines shown to paste into a bug report.
 

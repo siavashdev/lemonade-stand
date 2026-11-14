@@ -4,8 +4,10 @@ This guide covers how to run the automated tests locally. Tests run on
 [Vitest](https://vitest.dev) and are split into two tiers:
 
 - **Core tests**: deterministic, network-light, and fast. They cover config
-  validation, the Pantry catalog, and a real filesystem-MCP integration test.
-  These run on every push and pull request to `main`.
+  validation, the Pantry catalog, how the app interprets a Lemonade server's
+  models and logs (against an in-process fake server, so no real `lemond` is
+  needed), the log buffer and viewer helpers, and a real filesystem-MCP
+  integration test. These run on every push and pull request to `main`.
 - **Optional tests**: integration tests for the `uvx`-based Pantry servers
   (time, sqlite, git, fetch). They need the [`uv`](https://github.com/astral-sh/uv)
   toolchain and network access, so they're opt-in.
@@ -36,13 +38,20 @@ in the output), so `npm test` is always safe to run.
 Expected output looks like:
 
 ```
- ✓ test/config.test.ts (10)
+ ✓ test/config.test.ts (14)
+ ✓ test/lemonade-client.test.ts (22)
+ ✓ test/lemonade-models.test.ts (25)
+ ✓ test/log-format.test.ts (13)
+ ✓ test/logger.test.ts (22)
  ✓ test/mcp-filesystem.integration.test.ts (7)
+ ✓ test/server-logs.test.ts (25)
  ↓ test/mcp-optional.integration.test.ts (4) [skipped]
 
- Test Files  2 passed | 1 skipped (3)
-      Tests  17 passed | 4 skipped (21)
+ Test Files  7 passed | 1 skipped (8)
+      Tests  128 passed | 4 skipped (132)
 ```
+
+(The counts grow as tests are added.)
 
 ### Watch mode
 
@@ -88,6 +97,11 @@ that's installed too.
 | File | Tier | Covers |
 |------|------|--------|
 | [`test/config.test.ts`](../test/config.test.ts) | Core | `catalog.json` / `servers.json` shape, unique ids, `{{path}}` handling, and the Pantry config helpers (`serverFromCatalog`, `pathForServer`, `withServerPath`). |
+| [`test/lemonade-client.test.ts`](../test/lemonade-client.test.ts) | Core | The real `LemonadeClient` against a small in-process fake Lemonade server: Omni collections that aren't fully downloaded, failures delivered inside a chat reply, context-size recalibration, loading a collection at the requested context, downloaded-state of collections in the model list, and picking a *downloaded* speech-to-text model. |
+| [`test/lemonade-models.test.ts`](../test/lemonade-models.test.ts) | Core | The pure helpers behind that behaviour (`src/main/lemonade/models.ts`): model-type labels, collection readiness, in-band error and context-overflow parsing, downloaded-model choice. |
+| [`test/server-logs.test.ts`](../test/server-logs.test.ts) | Core | The Lemonade server log stream (`src/main/lemonade/logs.ts`): URL building (proxy prefixes, `wss`, API key), wire-format parsing, and `ServerLogStream` reconnect/backoff and restart handling using a fake socket. |
+| [`test/logger.test.ts`](../test/logger.test.ts) | Core | The app's own log (`src/main/logger.ts`): the bounded buffer, `[tag]` splitting, console capture, and the opt-in log file. |
+| [`test/log-format.test.ts`](../test/log-format.test.ts) | Core | The log viewer's pure helpers (`src/renderer/logFormat.ts`): level and text filtering, copy formatting, and capped appends. |
 | [`test/mcp-filesystem.integration.test.ts`](../test/mcp-filesystem.integration.test.ts) | Core | Boots the real filesystem MCP server against a temp folder and drives `write_file` / `read_file` / `list_directory` through the app's `McpManager`, plus error handling. |
 | [`test/mcp-optional.integration.test.ts`](../test/mcp-optional.integration.test.ts) | Optional | Same integration approach for the `uvx` servers: time, sqlite, git, and fetch. Skipped unless `RUN_UVX_TESTS` is set. |
 

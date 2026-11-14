@@ -997,7 +997,11 @@ export class Agent {
     // Pre-select the proposed tools, but keep only ones that really exist so a
     // made-up name can't slip through; the user reviews the checked list before
     // saving.
-    const available = new Set(this.mcp.getOpenAiTools().map((tool) => tool.function.name))
+    const available = new Set(
+      this.mcp
+        .getOpenAiTools()
+        .flatMap((tool) => (tool.type === 'function' ? [tool.function.name] : []))
+    )
     const rawTools = Array.isArray(args.allowedTools) ? args.allowedTools : []
     const allowedTools = [
       ...new Set(

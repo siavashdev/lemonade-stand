@@ -34,4 +34,8 @@ memory.jsonl
 # local tests
 temp/
 
+# Ad-hoc local "test" files and folders stay ignored, but the project's own suite
+# in /test (run by vitest and by CI) must not be, or new tests are silently left
+# out of commits.
 test
+!/test/

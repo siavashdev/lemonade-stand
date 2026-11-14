@@ -4,6 +4,17 @@ import type {
   ChatCompletionTool
 } from 'openai/resources/chat/completions'
 import type { ContextBreakdown, ContextInfo, DownloadJob, ModelInfo } from '@shared/types'
+import {
+  collectionStatus,
+  describeCollectionNotReady,
+  isCollectionReady,
+  modelTypeFromLabels,
+  parseCollectionError,
+  parseContextOverflow,
+  pickDownloadedModel,
+  type CollectionStatus,
+  type ModelsEntry
+} from './models'
 // Fallback context window used only when no override is configured and the
 // server can't be reached to report the loaded model's runtime context.
 const DEFAULT_CONTEXT_SIZE = 4096
@@ -14,20 +25,13 @@ const DEFAULT_CONTEXT_SIZE = 4096
 // staying memory-frugal. Every LLM this server ships supports far more.
 export const DEFAULT_LOAD_CONTEXT = 8192
 
-// Shape (subset) of lemond's /models response.
-interface ModelsEntry {
-  id?: string
-  labels?: string[]
-  max_context_window?: number
-  size?: number
-  downloaded?: boolean
-  /** Recipe type, e.g. 'llamacpp' or 'collection.omni' for Omni routers. */
-  recipe?: string
-  /** For Omni collections: the ids of the component models bundled together. */
-  components?: string[]
-  /** For Omni collections: a per-collection system prompt / persona, if any. */
-  system_prompt?: string
-}
+// How long a "this Omni collection is fully downloaded" check stays trusted
+// before chat() asks the server again.
+const COLLECTION_READY_TTL_MS = 30_000
+
+// How long the downloaded TTS / speech-to-text model picked for a feature is
+// reused before the server's model list is consulted again.
+const AUDIO_MODEL_TTL_MS = 5 * 60_000
 
 // Shape (subset) of lemond's /health response we rely on for context info.
 interface HealthModel {
@@ -127,17 +131,31 @@ export class LemonadeClient {
   private cachedServerContext?: number
   // Cached model max context window from the last successful /health lookup.
   private cachedMaxContext?: number
-  // Cached id of a server-served TTS model, resolved lazily on first speak().
-  // Keeps the configured id from going stale if the server renames its voice.
-  private cachedTtsModel?: string
-  // Cached id of a server-served transcription model, resolved lazily on the
-  // first transcribe() call so a stale/renamed model can't silently break it.
-  private cachedTranscriptionModel?: string
+  // The downloaded TTS / speech-to-text model last picked for a feature, reused
+  // for a few minutes so each spoken reply or dictation doesn't re-list the
+  // server's models. Keeps a stale/renamed configured id from silently breaking
+  // the feature, without ever picking a model the server would have to download.
+  private resolvedAudioModels = new Map<'tts' | 'stt', { id: string; at: number }>()
+  // Which model ids are Omni collections (true) or ordinary models (false), as
+  // learned from /models/{id}. chat() only needs to vet collections, so ordinary
+  // models are looked up once and then skipped.
+  private collectionKinds = new Map<string, boolean>()
+  // When each Omni collection was last confirmed fully downloaded, so a chat
+  // turn doesn't re-check on every agent step.
+  private collectionReadyAt = new Map<string, number>()
   // Cached per-model vision capability (id -> supports image input), populated
   // whenever listModels() runs. Lets chat() strip inline images before sending
   // them to a text-only model, which would otherwise 500 with "image input is
   // not supported" and abort the whole turn.
   private visionCapable = new Map<string, boolean>()
+  // Context size to request when the user switches models. This starts with the
+  // saved setting and follows successful context edits, while budgeting itself
+  // still uses the server's runtime value after a load.
+  private preferredContextSize?: number
+  // A newer model load (or a server change) cancels the older one. In
+  // particular, a slow startup Omni pull must not switch the model back after
+  // the user has already selected another model.
+  private activeLoad: AbortController | null = null
 
   constructor(
     baseURL: string,
@@ -157,6 +175,7 @@ export class LemonadeClient {
     this.baseURL = baseURL
     this.apiKey = apiKey
     this.contextOverride = contextOverride && contextOverride > 0 ? contextOverride : undefined
+    this.preferredContextSize = this.contextOverride
     this.completionReserve = completionReserve
     this.maxCompletionTokens = maxCompletionTokens > 0 ? maxCompletionTokens : 0
   }
@@ -196,16 +215,21 @@ export class LemonadeClient {
    * Repoint this client at a different Lemonade server. Recreates the OpenAI
    * client with the new base URL / key and clears every server-derived cache so
    * nothing from the old server leaks across (context sizes, resolved TTS and
-   * transcription model ids). Callers persist the choice and re-probe health.
+   * transcription model ids, Omni collection state). Callers persist the choice
+   * and re-probe health.
    */
   setConnection(baseURL: string, apiKey: string): void {
+    this.activeLoad?.abort()
+    this.activeLoad = null
     this.baseURL = baseURL
     this.apiKey = apiKey
     this.client = new OpenAI({ baseURL, apiKey: apiKey || 'lemonade' })
     this.cachedServerContext = undefined
     this.cachedMaxContext = undefined
-    this.cachedTtsModel = undefined
-    this.cachedTranscriptionModel = undefined
+    this.resolvedAudioModels.clear()
+    this.collectionKinds.clear()
+    this.collectionReadyAt.clear()
+    this.visionCapable.clear()
   }
 
   /**
@@ -311,80 +335,32 @@ export class LemonadeClient {
     //    the authoritative "is this on disk?" signal, since the full catalogue
     //    (below) can under-report downloaded state for pointer-based Omni
     //    collections whose components are already present.
+    const downloadedEntries =
+      (await this.getJson<{ data?: ModelsEntry[] }>('/models', 5000))?.data ?? []
     const downloadedIds = new Set<string>()
-    let downloadedEntries: ModelsEntry[] = []
-    try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 5000)
-      try {
-        const response = await fetch(`${this.baseURL}/models`, {
-          method: 'GET',
-          headers: this.authHeaders(),
-          signal: controller.signal
-        })
-        if (response.ok) {
-          const body = (await response.json()) as { data?: ModelsEntry[] }
-          downloadedEntries = body.data ?? []
-          for (const e of downloadedEntries) if (e.id) downloadedIds.add(e.id)
-        }
-      } finally {
-        clearTimeout(timer)
-      }
-    } catch {
-      // Server unreachable -> handled below; the UI shows an empty state.
-    }
+    for (const e of downloadedEntries) if (e.id) downloadedIds.add(e.id)
 
     // 2. The full catalogue (show_all=true) is the source of truth for *which*
     //    models to display, so not-yet-downloaded models , and models the user
     //    just uninstalled , stay visible with a Download button instead of
     //    vanishing from the list.
-    let entries: ModelsEntry[] = []
-    try {
-      const controllerAll = new AbortController()
-      const timerAll = setTimeout(() => controllerAll.abort(), 5000)
-      try {
-        const response = await fetch(`${this.baseURL}/models?show_all=true`, {
-          method: 'GET',
-          headers: this.authHeaders(),
-          signal: controllerAll.signal
-        })
-        if (response.ok) {
-          const body = (await response.json()) as { data?: ModelsEntry[] }
-          entries = body.data ?? []
-        }
-      } finally {
-        clearTimeout(timerAll)
-      }
-    } catch {
-      // Best-effort; fall back to the downloaded-only list below.
-    }
+    let entries =
+      (await this.getJson<{ data?: ModelsEntry[] }>('/models?show_all=true', 5000))?.data ?? []
     // If the full catalogue couldn't be fetched, fall back to whatever the
     // downloaded-only list returned so the picker still works offline-ish.
     if (entries.length === 0) entries = downloadedEntries
 
     // Which model ids are currently loaded, per /health.
     const loaded = new Set<string>()
-    try {
-      const controller2 = new AbortController()
-      const timer2 = setTimeout(() => controller2.abort(), 3000)
-      try {
-        const health = await fetch(`${this.baseURL}/health`, {
-          method: 'GET',
-          headers: this.authHeaders(),
-          signal: controller2.signal
-        })
-        if (health.ok) {
-          const body = (await health.json()) as HealthResponse
-          for (const m of body.all_models_loaded ?? []) {
-            if (m.loaded && m.model_name) loaded.add(m.model_name)
-          }
-        }
-      } finally {
-        clearTimeout(timer2)
-      }
-    } catch {
-      // Best-effort; loaded flags just stay false.
+    const health = await this.getJson<HealthResponse>('/health', 3000)
+    for (const m of health?.all_models_loaded ?? []) {
+      if (m.loaded && m.model_name) loaded.add(m.model_name)
     }
+
+    // A model is on disk when the downloaded-only list says so, or the catalogue
+    // entry itself does.
+    const onDisk = new Set(downloadedIds)
+    for (const e of entries) if (e.id && e.downloaded) onDisk.add(e.id)
 
     return entries.map((e) => {
       const labels = e.labels ?? []
@@ -392,35 +368,34 @@ export class LemonadeClient {
       // tags these entries with recipe 'collection.omni'. They're multimodal
       // and well-suited to agentic use.
       const omni = e.recipe === 'collection.omni'
+      const components = omni ? (e.components ?? []) : undefined
       // Vision-capable models advertise the 'vision' label (they ship an mmproj
       // projector); Omni routers bundle a vision component. Cache this so chat()
       // can avoid sending images to a model that can't accept them.
       if (e.id) this.visionCapable.set(e.id, omni || labels.includes('vision'))
-      // Infer a coarse modality from labels for grouping in the UI. Omni models
-      // are treated as chat models so they surface in the agent's model list.
-      const type = omni
-        ? 'llm'
-        : labels.includes('tts')
-          ? 'tts'
-          : labels.includes('image')
-            ? 'image'
-            : labels.includes('transcription') || labels.includes('realtime-transcription')
-              ? 'transcription'
-              : 'llm'
+      // A collection has no weights of its own, so it counts as downloaded once
+      // its manifest is pulled and every component is on disk. The server's own
+      // flag for it can't be trusted: v2026.46 flips it to false as soon as the
+      // collection is loaded, which left a fully installed Omni model showing a
+      // "Download" button instead of "Load".
+      const collectionOnDisk =
+        components !== undefined &&
+        components.length > 0 &&
+        components.every((c) => onDisk.has(c))
       return {
         id: e.id ?? '',
-        type,
+        type: modelTypeFromLabels(labels, omni),
         labels,
         maxContextWindow: e.max_context_window,
         sizeGb: e.size,
         // Trust the authoritative downloaded-only list first; the full catalogue
         // can report a pointer Omni collection as not-downloaded even when its
         // components are already on disk.
-        downloaded: (e.id ? downloadedIds.has(e.id) : false) || (e.downloaded ?? false),
+        downloaded: omni ? collectionOnDisk : e.id ? onDisk.has(e.id) : false,
         loaded: e.id ? loaded.has(e.id) : false,
         agentReady: labels.includes('tool-calling') || omni,
         omni,
-        components: omni ? (e.components ?? []) : undefined,
+        components,
         systemPrompt: omni ? e.system_prompt : undefined,
         active: e.id === this.model
       }
@@ -436,44 +411,120 @@ export class LemonadeClient {
    */
   async loadModel(
     id: string,
-    ctxSize: number = DEFAULT_LOAD_CONTEXT
+    ctxSize?: number
   ): Promise<{ ok: boolean; error?: string }> {
+    this.activeLoad?.abort()
+    const operation = new AbortController()
+    this.activeLoad = operation
+    const requestedContext = ctxSize ?? this.preferredContextSize ?? DEFAULT_LOAD_CONTEXT
+    const superseded = (): boolean => this.activeLoad !== operation || operation.signal.aborted
+    const supersededResult = (): { ok: false; error: string } => ({
+      ok: false,
+      error: 'Model load was superseded by a newer request.'
+    })
+
     // Pointer-based Omni collections (e.g. LMX-Omni-*, RPG-HaloTales) resolve
     // their component list only after their manifest is downloaded, and the
     // server's /load intentionally skips downloading for collection recipes.
     // Loading such a collection before it's pulled fails with "GGUF file not
-    // found for checkpoint", so pull it first to register + fetch its parts.
-    const entry = await this.fetchModelEntry(id)
-    if (
-      entry?.recipe === 'collection.omni' &&
-      entry.downloaded !== true &&
-      (entry.components?.length ?? 0) === 0
-    ) {
-      const pulled = await this.pullModel(id)
-      if (!pulled.ok) return pulled
-    }
-
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 300000)
+    // found for checkpoint", so pull it first to register + fetch its parts. The
+    // same goes for a collection whose manifest is known but whose components
+    // aren't all on disk (e.g. after the server's model store was replaced).
     try {
+      const status = await this.fetchCollectionStatus(id, operation.signal)
+      if (superseded()) return supersededResult()
+      if (status?.isCollection && !isCollectionReady(status)) {
+        console.info(
+          `[lemonade] Omni model "${id}" isn't fully downloaded ` +
+            (status.components.length === 0
+              ? '(no component list yet)'
+              : `(missing ${status.missing.join(', ')})`) +
+            '; pulling it before loading, which can take several minutes'
+        )
+        const pulled = await this.pullModel(id, operation.signal)
+        if (superseded()) return supersededResult()
+        if (!pulled.ok) return pulled
+      }
+
       const response = await fetch(`${this.baseURL}/load`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
-        body: JSON.stringify({ model_name: id, ctx_size: ctxSize }),
-        signal: controller.signal
+        body: JSON.stringify({ model_name: id, ctx_size: requestedContext }),
+        signal: AbortSignal.any([operation.signal, AbortSignal.timeout(300_000)])
+      })
+      if (superseded()) return supersededResult()
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '')
+        const error = `Server returned ${response.status}: ${detail || 'load failed'}`
+        console.warn(`[lemonade] loading "${id}" failed: ${error}`)
+        return { ok: false, error }
+      }
+      this.model = id
+      this.contextOverride = undefined
+      this.preferredContextSize = requestedContext
+      this.cachedServerContext = requestedContext
+      this.cachedMaxContext = undefined
+      console.info(`[lemonade] loaded "${id}"`)
+      // The server ignores `ctx_size` when loading a collection (each component
+      // loads with its own saved options), so apply it to the chat component
+      // ourselves. Without this an Omni model comes up with a 4096-token window
+      // that the agent's tool-heavy prompt can't fit.
+      if (status?.isCollection) await this.matchCollectionContext(requestedContext, operation.signal)
+      if (superseded()) return supersededResult()
+      return { ok: true }
+    } catch (err) {
+      if (superseded()) return supersededResult()
+      const error = err instanceof Error ? err.message : String(err)
+      console.warn(`[lemonade] loading "${id}" failed: ${error}`)
+      return { ok: false, error }
+    } finally {
+      if (this.activeLoad === operation) this.activeLoad = null
+    }
+  }
+
+  /**
+   * Make an Omni collection's chat component run with at least `ctxSize` tokens
+   * of context. A collection's `/load` doesn't forward `ctx_size` to its parts,
+   * so after loading one the LLM component is reloaded directly with the size
+   * persisted (`save_options`), mirroring what the context editor does. Best
+   * effort: failures are logged and leave the component as it was.
+   */
+  private async matchCollectionContext(ctxSize: number, signal?: AbortSignal): Promise<void> {
+    try {
+      const llm = await this.fetchModelHealth()
+      const component = llm?.model_name
+      const current = llm?.recipe_options?.ctx_size
+      if (!component || typeof current !== 'number') return
+      if (current >= ctxSize) {
+        this.cachedServerContext = current
+        return
+      }
+      console.info(
+        `[lemonade] "${component}" (chat component of "${this.model}") runs with a ${current}-token ` +
+          `context; reloading it with ${ctxSize}`
+      )
+      const response = await fetch(`${this.baseURL}/load`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
+        body: JSON.stringify({ model_name: component, ctx_size: ctxSize, save_options: true }),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(180_000)])
+          : AbortSignal.timeout(180_000)
       })
       if (!response.ok) {
         const detail = await response.text().catch(() => '')
-        return { ok: false, error: `Server returned ${response.status}: ${detail || 'load failed'}` }
+        console.warn(
+          `[lemonade] couldn't raise "${component}" to ${ctxSize} tokens: ` +
+            `server returned ${response.status}: ${detail || 'load failed'}`
+        )
+        return
       }
-      this.model = id
-      this.cachedServerContext = undefined
-      this.cachedMaxContext = undefined
-      return { ok: true }
+      this.cachedServerContext = ctxSize
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
-    } finally {
-      clearTimeout(timer)
+      if (signal?.aborted) return
+      console.warn(
+        `[lemonade] couldn't raise the chat component's context: ${err instanceof Error ? err.message : String(err)}`
+      )
     }
   }
 
@@ -484,25 +535,33 @@ export class LemonadeClient {
    * component list once their manifest is present. Downloads can be large, so
    * the timeout is generous.
    */
-  async pullModel(id: string): Promise<{ ok: boolean; error?: string }> {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 1_800_000)
+  async pullModel(id: string, signal?: AbortSignal): Promise<{ ok: boolean; error?: string }> {
+    // Whatever was known about this collection is stale once a pull starts.
+    this.collectionReadyAt.delete(id)
     try {
       const response = await fetch(`${this.baseURL}/pull`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
         body: JSON.stringify({ model_name: id, stream: false }),
-        signal: controller.signal
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(1_800_000)])
+          : AbortSignal.timeout(1_800_000)
       })
       if (!response.ok) {
         const detail = await response.text().catch(() => '')
-        return { ok: false, error: `Server returned ${response.status}: ${detail || 'pull failed'}` }
+        const error = `Server returned ${response.status}: ${detail || 'pull failed'}`
+        console.warn(`[lemonade] pulling "${id}" failed: ${error}`)
+        return { ok: false, error }
       }
+      console.info(`[lemonade] pulled "${id}"`)
       return { ok: true }
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
-    } finally {
-      clearTimeout(timer)
+      if (signal?.aborted) {
+        return { ok: false, error: 'Model load was superseded by a newer request.' }
+      }
+      const error = err instanceof Error ? err.message : String(err)
+      console.warn(`[lemonade] pulling "${id}" failed: ${error}`)
+      return { ok: false, error }
     }
   }
 
@@ -515,6 +574,10 @@ export class LemonadeClient {
   async deleteModel(id: string): Promise<{ ok: boolean; error?: string }> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 60000)
+    // What's known about this model (a collection's readiness, a speech model
+    // picked earlier) is out of date the moment it is deleted.
+    this.collectionReadyAt.delete(id)
+    this.resolvedAudioModels.clear()
     try {
       const response = await fetch(`${this.baseURL}/delete`, {
         method: 'POST',
@@ -529,6 +592,7 @@ export class LemonadeClient {
           error: `Server returned ${response.status}: ${detail || 'delete failed'}`
         }
       }
+      console.info(`[lemonade] deleted "${id}"`)
       return { ok: true }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -604,6 +668,7 @@ export class LemonadeClient {
   async startDownload(id: string): Promise<DownloadJob> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 30000)
+    this.collectionReadyAt.delete(id)
     try {
       const response = await fetch(`${this.baseURL}/pull`, {
         method: 'POST',
@@ -616,6 +681,7 @@ export class LemonadeClient {
         throw new Error(`Server returned ${response.status}: ${detail || 'download failed'}`)
       }
       const body = (await response.json()) as DownloadEntry
+      console.info(`[lemonade] started downloading "${id}"`)
       return this.mapDownload({ ...body, model_name: body.model_name ?? id })
     } finally {
       clearTimeout(timer)
@@ -660,23 +726,65 @@ export class LemonadeClient {
     }
   }
 
-  /** Fetch a single model's registry entry from /models/{id}, or null. */
-  private async fetchModelEntry(id: string): Promise<ModelsEntry | null> {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 5000)
+  /** GET `path` (relative to the base URL) as JSON, or null on any failure
+   * (unreachable, timed out, non-2xx, or not JSON). */
+  private async getJson<T>(
+    path: string,
+    timeoutMs: number,
+    signal?: AbortSignal
+  ): Promise<T | null> {
     try {
-      const response = await fetch(`${this.baseURL}/models/${encodeURIComponent(id)}`, {
+      const response = await fetch(`${this.baseURL}${path}`, {
         method: 'GET',
         headers: this.authHeaders(),
-        signal: controller.signal
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+          : AbortSignal.timeout(timeoutMs)
       })
       if (!response.ok) return null
-      return (await response.json()) as ModelsEntry
+      return (await response.json()) as T
     } catch {
       return null
-    } finally {
-      clearTimeout(timer)
     }
+  }
+
+  /** Fetch a single model's registry entry from /models/{id}, or null. */
+  private async fetchModelEntry(id: string, signal?: AbortSignal): Promise<ModelsEntry | null> {
+    return this.getJson<ModelsEntry>(`/models/${encodeURIComponent(id)}`, 5000, signal)
+  }
+
+  /**
+   * Whether `id` is an Omni collection and, if so, which of its components are
+   * missing. Null when the server can't be asked (down, or it doesn't know the
+   * id); callers then proceed and let the real request report the problem. The
+   * answer also records whether the model is a collection at all, so chat() can
+   * skip this lookup for ordinary models.
+   */
+  private async fetchCollectionStatus(
+    id: string,
+    signal?: AbortSignal
+  ): Promise<CollectionStatus | null> {
+    const entry = await this.fetchModelEntry(id, signal)
+    if (!entry) return null
+    let status = collectionStatus(entry)
+    // Older and transitional servers may omit all or only some component
+    // states. Fill every unrepresented component from the downloaded-only list.
+    const represented = new Set((entry.models ?? []).flatMap((model) => (model.id ? [model.id] : [])))
+    if (
+      status.isCollection &&
+      status.components.length > 0 &&
+      status.components.some((component) => !represented.has(component))
+    ) {
+      const body = await this.getJson<{ data?: ModelsEntry[] }>('/models', 5000, signal)
+      if (body) {
+        const downloaded = new Set<string>()
+        for (const e of body.data ?? []) if (e.id) downloaded.add(e.id)
+        status = collectionStatus(entry, downloaded)
+      }
+    }
+    if (signal?.aborted) return null
+    this.collectionKinds.set(id, status.isCollection)
+    return status
   }
 
   /**
@@ -685,18 +793,22 @@ export class LemonadeClient {
    * model unloaded or loaded at a smaller context after a restart, which is why
    * the app's context budget would otherwise revert to the 4096 fallback. This
    * runs best-effort: any failure (server down, model still downloading) is
-   * swallowed so it never blocks app launch.
+   * logged and swallowed so it never blocks app launch.
    */
   async ensureModelLoaded(ctxSize: number = DEFAULT_LOAD_CONTEXT): Promise<void> {
+    this.preferredContextSize = ctxSize
     try {
       const entry = await this.fetchModelHealth()
       const current = entry?.recipe_options?.ctx_size
       // Already loaded at a big-enough context -> leave it (don't downgrade a
       // context the user may have raised on purpose).
       if (entry?.loaded && typeof current === 'number' && current >= ctxSize) return
-      await this.loadModel(this.model, ctxSize)
-    } catch {
-      // Best-effort only.
+      const result = await this.loadModel(this.model, ctxSize)
+      if (!result.ok) {
+        console.warn(`[lemonade] couldn't load "${this.model}" at startup: ${result.error}`)
+      }
+    } catch (err) {
+      console.warn('[lemonade] startup model load failed:', err)
     }
   }
 
@@ -810,6 +922,7 @@ export class LemonadeClient {
       // for the current session even when an env/config override was present,
       // so budget checks and warnings reflect what the server is now running.
       this.contextOverride = undefined
+      this.preferredContextSize = this.cachedServerContext
       return {
         model: this.model,
         contextSize: this.cachedServerContext,
@@ -930,21 +1043,6 @@ export class LemonadeClient {
   }
 
   /**
-   * Single chat completion. Tools are passed straight through in OpenAI
-   * function-tool shape; the model may respond with tool_calls that the agent
-   * loop is responsible for executing.
-   *
-   * The request is *streamed* even though callers only consume the final,
-   * reassembled result. This is deliberate and load-bearing for the stop
-   * button: with a non-streamed request, aborting the fetch closes the socket,
-   * but the OpenAI-compatible backend (llama.cpp / OGA) doesn't notice the
-   * client is gone until it writes the response , which never happens until the
-   * whole reply is generated , so it keeps the GPU/NPU busy to completion (the
-   * fan keeps spinning). Streaming makes the backend write a chunk per token,
-   * so the dropped connection is detected on the next token and generation
-   * stops promptly when the user hits stop.
-   */
-  /**
    * Whether `id` is the id of a model that accepts image input, using the cache
    * populated by listModels(). On a cache miss it refreshes the model list once
    * (which fills the cache) before answering. Defaults to false when the answer
@@ -962,12 +1060,93 @@ export class LemonadeClient {
     return this.visionCapable.get(id) ?? false
   }
 
+  /** Whether the server currently has a download running for `id`. */
+  private async isDownloading(id: string): Promise<boolean> {
+    const jobs = await this.listDownloads()
+    return jobs.some((j) => j.modelName === id && (j.running || j.status === 'downloading'))
+  }
+
+  /**
+   * Refuse to chat with an Omni collection that can't answer yet, with a clear
+   * reason, instead of sending the request and showing the server's reply.
+   *
+   * A collection only lists its components once its manifest is pulled, and each
+   * component has to be on disk. Chat sent before that makes the server pull the
+   * parts *inside the request* (minutes of silence) and then fail with the cryptic
+   * "Collection '…' has no chat-capable component", delivered as if it were the
+   * model's answer. Ordinary models are recognised on the first call and skipped
+   * from then on; a confirmed-ready collection is trusted for a short while.
+   */
+  private async assertChatModelReady(): Promise<void> {
+    const id = this.model
+    if (this.collectionKinds.get(id) === false) return
+    const readyAt = this.collectionReadyAt.get(id)
+    if (readyAt !== undefined && Date.now() - readyAt < COLLECTION_READY_TTL_MS) return
+    const status = await this.fetchCollectionStatus(id)
+    // Couldn't ask (server down, unknown id) or not a collection: let the real
+    // request run and report whatever is actually wrong.
+    if (!status?.isCollection) return
+    if (isCollectionReady(status)) {
+      this.collectionReadyAt.set(id, Date.now())
+      return
+    }
+    this.collectionReadyAt.delete(id)
+    const message = describeCollectionNotReady(id, status, await this.isDownloading(id))
+    console.warn(`[lemonade] ${message}`)
+    throw new Error(message)
+  }
+
+  /**
+   * Turn an Omni collection's in-band failure (see parseCollectionError) into a
+   * real, explained error. Also recalibrates the context window when the failure
+   * reveals the server runs a smaller one than the app assumed.
+   */
+  private collectionFailure(reason: string): Error {
+    const id = this.model
+    this.collectionReadyAt.delete(id)
+    if (/no chat-capable component/i.test(reason)) {
+      return new Error(
+        `The Omni model "${id}" can't chat yet: its component models aren't downloaded on the ` +
+          'Lemonade server. Open Models and download it (or pick another model), then try again.'
+      )
+    }
+    const overflow = parseContextOverflow(reason)
+    if (overflow) {
+      // Believe the server: budget against the window it really runs from now
+      // on, so the agent warns/compacts before sending instead of failing here.
+      this.cachedServerContext = overflow.available
+      this.contextOverride = undefined
+      return new Error(
+        `This request needs about ${overflow.requested.toLocaleString()} tokens but "${id}" is ` +
+          `running with only a ${overflow.available.toLocaleString()}-token context on the ` +
+          'server. Raise it from the context button in the status bar, or start a new session.'
+      )
+    }
+    return new Error(`The Omni model "${id}" reported an error: ${reason}`)
+  }
+
+  /**
+   * Single chat completion. Tools are passed straight through in OpenAI
+   * function-tool shape; the model may respond with tool_calls that the agent
+   * loop is responsible for executing.
+   *
+   * The request is *streamed* even though callers only consume the final,
+   * reassembled result. This is deliberate and load-bearing for the stop
+   * button: with a non-streamed request, aborting the fetch closes the socket,
+   * but the OpenAI-compatible backend (llama.cpp / OGA) doesn't notice the
+   * client is gone until it writes the response , which never happens until the
+   * whole reply is generated , so it keeps the GPU/NPU busy to completion (the
+   * fan keeps spinning). Streaming makes the backend write a chunk per token,
+   * so the dropped connection is detected on the next token and generation
+   * stops promptly when the user hits stop.
+   */
   async chat(
     messages: ChatCompletionMessageParam[],
     tools: ChatCompletionTool[],
     signal?: AbortSignal,
     onReasoning?: (delta: string) => void
   ): Promise<OpenAI.Chat.Completions.ChatCompletion.Choice> {
+    await this.assertChatModelReady()
     // Text-only models reject inline images with a 500 that aborts the turn. If
     // any message carries an image and the loaded model can't see images, strip
     // the image parts and leave a note so the request stays valid and the model
@@ -977,7 +1156,7 @@ export class LemonadeClient {
         ? messages
         : messages.map(stripImageContent)
       : messages
-    const stream = this.client.beta.chat.completions.stream(
+    const stream = this.client.chat.completions.stream(
       {
         model: this.model,
         messages: outgoing,
@@ -1019,6 +1198,16 @@ export class LemonadeClient {
       const response = await stream.finalChatCompletion()
       const choice = response.choices[0]
       if (!choice) throw new Error('lemond returned no choices')
+      // An Omni collection reports its failures as the assistant's own reply
+      // (see parseCollectionError). Surface them as errors rather than letting
+      // them be shown, saved to history, spoken, or used as a chat title.
+      if (this.collectionKinds.get(this.model) && !choice.message.tool_calls?.length) {
+        const reason = parseCollectionError(choice.message.content)
+        if (reason) {
+          console.warn(`[lemonade] Omni model "${this.model}" answered with an error: ${reason}`)
+          throw this.collectionFailure(reason)
+        }
+      }
       // Reattach our fully-accumulated reasoning (the SDK reassembly drops it).
       // Authoritative: our concatenation is the complete text, so always prefer it.
       if (reasoning.trim()) {
@@ -1107,26 +1296,46 @@ export class LemonadeClient {
   }
 
   /**
-   * Resolve a TTS model the server actually serves. `preferred` (from config)
-   * wins when it's present in the server's model list; otherwise the first
-   * model labeled "tts" is used. Resolution is cached so it costs one /models
-   * lookup per process. If the server can't be reached, `preferred` is returned
-   * unchanged so a transient outage doesn't permanently disable audio.
+   * Pick the *downloaded* model of `type` ('tts' | 'transcription') to use for a
+   * feature. `preferred` (from config) wins when it's downloaded (compared
+   * case-insensitively); otherwise another downloaded model of the same family,
+   * then any downloaded one. The choice is cached for a few minutes. If the
+   * server can't be reached, or knows no model of that type at all, `preferred`
+   * is returned unchanged so the request itself reports the real problem.
+   *
+   * A model that isn't downloaded is never chosen: the server would download it
+   * *inside* the request, so speech or dictation would hang for as long as that
+   * takes. This used to pick the first catalogue entry of the type, which after
+   * the server added Moonshine speech models (listed ahead of Whisper) meant a
+   * ~1 GB download on every first dictation. Throws a clear error when models of
+   * the type exist but none is downloaded.
    */
-  private async resolveTtsModel(preferred: string): Promise<string> {
-    if (this.cachedTtsModel) return this.cachedTtsModel
+  private async resolveAudioModel(
+    feature: 'tts' | 'stt',
+    preferred: string
+  ): Promise<string> {
+    const cached = this.resolvedAudioModels.get(feature)
+    if (cached && Date.now() - cached.at < AUDIO_MODEL_TTL_MS) return cached.id
+    const type = feature === 'tts' ? 'tts' : 'transcription'
     const models = await this.listModels()
-    const ttsModels = models.filter((m) => m.type === 'tts')
-    if (ttsModels.length === 0) return preferred
-    const match = ttsModels.find((m) => m.id === preferred)
-    const chosen = match?.id ?? ttsModels[0].id
-    this.cachedTtsModel = chosen
-    if (chosen !== preferred) {
-      console.warn(
-        `[tts] configured model "${preferred}" not served; using "${chosen}" instead`
+    const ofType = models.filter((m) => m.type === type)
+    if (ofType.length === 0) return preferred
+    const chosen = pickDownloadedModel(models, type, preferred)
+    if (!chosen) {
+      const known = ofType.find((m) => m.id.toLowerCase() === preferred.toLowerCase()) ?? ofType[0]
+      const kind = feature === 'tts' ? 'text-to-speech' : 'speech-to-text'
+      throw new Error(
+        `No ${kind} model is downloaded on the Lemonade server. Open Models and download one ` +
+          `(for example ${known.id}${known.sizeGb ? `, ${known.sizeGb} GB` : ''}).`
       )
     }
-    return chosen
+    this.resolvedAudioModels.set(feature, { id: chosen.id, at: Date.now() })
+    if (chosen.id !== preferred) {
+      console.warn(
+        `[${feature}] configured model "${preferred}" isn't downloaded; using "${chosen.id}" instead`
+      )
+    }
+    return chosen.id
   }
 
   /**
@@ -1143,7 +1352,7 @@ export class LemonadeClient {
     voice: string,
     format: string
   ): Promise<{ base64: string; format: string }> {
-    const resolvedModel = await this.resolveTtsModel(model)
+    const resolvedModel = await this.resolveAudioModel('tts', model)
     const response = await this.client.audio.speech.create({
       model: resolvedModel,
       voice: voice as never, // lemond accepts backend voice ids beyond the SDK's enum
@@ -1152,30 +1361,6 @@ export class LemonadeClient {
     })
     const bytes = Buffer.from(await response.arrayBuffer())
     return { base64: bytes.toString('base64'), format }
-  }
-
-  /**
-   * Resolve a transcription (speech-to-text) model the server actually serves.
-   * `preferred` (from config) wins when it's present in the server's model list;
-   * otherwise the first model typed "transcription" is used. Resolution is
-   * cached so it costs one /models lookup per process. If the server can't be
-   * reached, `preferred` is returned unchanged so a transient outage doesn't
-   * permanently disable dictation.
-   */
-  private async resolveTranscriptionModel(preferred: string): Promise<string> {
-    if (this.cachedTranscriptionModel) return this.cachedTranscriptionModel
-    const models = await this.listModels()
-    const sttModels = models.filter((m) => m.type === 'transcription')
-    if (sttModels.length === 0) return preferred
-    const match = sttModels.find((m) => m.id === preferred)
-    const chosen = match?.id ?? sttModels[0].id
-    this.cachedTranscriptionModel = chosen
-    if (chosen !== preferred) {
-      console.warn(
-        `[stt] configured model "${preferred}" not served; using "${chosen}" instead`
-      )
-    }
-    return chosen
   }
 
   /**
@@ -1192,7 +1377,7 @@ export class LemonadeClient {
     model: string,
     signal?: AbortSignal
   ): Promise<string> {
-    const resolvedModel = await this.resolveTranscriptionModel(model)
+    const resolvedModel = await this.resolveAudioModel('stt', model)
     const bytes = Buffer.from(audioBase64, 'base64')
     const ext = mimeType.includes('webm')
       ? 'webm'

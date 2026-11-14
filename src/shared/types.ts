@@ -450,6 +450,41 @@ export type AgentEvent =
   | { type: 'error'; message: string }
   | { type: 'done' }
 
+/** Severity of a log line, normalized to lower case. The Lemonade server reports
+ * Trace…Fatal; the app's own logs use debug / info / warning / error. */
+export type LogSeverity = 'trace' | 'debug' | 'info' | 'warning' | 'error' | 'fatal'
+
+/** One line in a log viewer, from either the Lemonade server or the app. */
+export interface LogEntry {
+  /** Monotonic sequence number within its source; used to de-duplicate and order. */
+  seq: number
+  /** Display timestamp. For server logs this is the server's own clock; for the
+   * app it's the local wall-clock time the line was written. */
+  timestamp: string
+  severity: LogSeverity
+  /** Where the line came from, e.g. `Server` / `Router` / `ModelManager` for
+   * lemond, or `mcp` / `agent` / `ui` for the app. */
+  tag: string
+  /** The message text, without the timestamp / level / tag prefix. */
+  message: string
+}
+
+/** Pushed to the renderer while the Lemonade server's log stream is open. */
+export type ServerLogEvent =
+  // Connection state of the log stream itself (not of the server's health).
+  | { type: 'status'; state: 'connecting' | 'live' | 'closed'; message?: string }
+  // The server's retained backlog, sent once per (re)connect. Replaces the view.
+  | { type: 'snapshot'; entries: LogEntry[] }
+  // One new line, as the server emits it.
+  | { type: 'entry'; entry: LogEntry }
+
+/** The app's own retained log lines, plus the on-disk log file when file
+ * logging is enabled (LOG_LEVEL=debug), so the viewer can reveal it. */
+export interface AppLogsSnapshot {
+  entries: LogEntry[]
+  filePath: string | null
+}
+
 /** The `window.api` contract exposed by the preload bridge. */
 export interface RendererApi {
   /** Verbose diagnostic logging flag (LOG_LEVEL=debug), for renderer-side
@@ -590,4 +625,18 @@ export interface RendererApi {
   closeWindow(): void
   /** Open a folder in Windows Explorer (or equivalent file manager). */
   openFolderInExplorer(folderPath: string): Promise<void>
+  /** The app's own retained log lines (main process + UI console) and, when file
+   * logging is on, the path of the log file. */
+  getAppLogs(): Promise<AppLogsSnapshot>
+  /** Receive each new app log line as it is written. Subscribing starts the
+   * live feed in the main process; the returned function stops it. */
+  onAppLog(handler: (entry: LogEntry) => void): () => void
+  /** Reveal the app's log file in the OS file manager. Resolves false when file
+   * logging is off (there is no file to show). */
+  revealAppLogFile(): Promise<boolean>
+  /** Stream the Lemonade server's own logs (its `/logs/stream` WebSocket). The
+   * main process opens the connection (the renderer's CSP can't) and relays a
+   * status event, the server's backlog, then each new line. The returned
+   * function closes the stream. */
+  onServerLog(handler: (event: ServerLogEvent) => void): () => void
 }

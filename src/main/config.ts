@@ -462,11 +462,25 @@ function pathArgIndex(entry: CatalogEntry): number {
   return (entry.args ?? []).findIndex((a) => a.includes(PATH_PLACEHOLDER))
 }
 
+/** Index in a stored server's `args` that holds the path for `entry`'s
+ * `{{path}}` slot, or -1 when the entry has no such slot. The slot is located
+ * from the template arg just before the placeholder (e.g. `--db-path`), not by
+ * absolute position, so a server saved before its catalog entry gained launcher
+ * flags up front (`uvx --with mcp<2 ...`) still resolves to the right arg. */
+function pathSlot(entry: CatalogEntry, args: string[]): number {
+  const at = pathArgIndex(entry)
+  if (at > 0) {
+    const anchor = args.indexOf((entry.args ?? [])[at - 1])
+    if (anchor >= 0) return anchor + 1
+  }
+  return at
+}
+
 /** Recover the filesystem path a configured path-based server is using, by
  * matching the catalog template's `{{path}}` slot against the stored args. */
 export function pathForServer(entry: CatalogEntry, server: McpServerConfig): string | undefined {
   if (server.transport !== 'stdio' || entry.transport !== 'stdio') return undefined
-  const idx = pathArgIndex(entry)
+  const idx = pathSlot(entry, server.args ?? [])
   if (idx < 0) return undefined
   return server.args?.[idx]
 }
@@ -478,11 +492,10 @@ export function withServerPath(
   path: string
 ): McpServerConfig {
   if (server.transport !== 'stdio') return server
-  const idx = pathArgIndex(entry)
-  const templateArgs = entry.args ?? []
+  const templateIdx = pathArgIndex(entry)
   const args = (server.args ?? []).slice()
-  if (idx >= 0) {
-    args[idx] = templateArgs[idx].replace(PATH_PLACEHOLDER, path)
+  if (templateIdx >= 0) {
+    args[pathSlot(entry, args)] = (entry.args ?? [])[templateIdx].replace(PATH_PLACEHOLDER, path)
   }
   return { ...server, args }
 }
