@@ -68,15 +68,31 @@ The quickest way to run a lemonade server would to be install docker and run it 
 docker run -d `
   --name lemonade-server `
   -p 13305:13305 `
-  -v "$env:USERPROFILE/.cache/huggingface:/opt/lemonade/.cache/huggingface" `
+  -v lemonade-cache:/opt/lemonade/.cache/huggingface `
   -v lemonade-llama:/opt/lemonade/llama `
-  -v "$env:USERPROFILE/.cache/lemonade:/opt/lemonade/.cache/lemonade" `
+  -v lemonade-data:/opt/lemonade/.cache/lemonade `
+  -v lemonade-config:/opt/lemonade/.config/lemonade `
   ghcr.io/lemonade-sdk/lemonade-server:latest
 ```
+
+Keep all four volumes. `lemonade-config` holds the server's saved settings,
+including the context size of each model; if it isn't a volume, recreating the
+container to upgrade the server resets them (an Omni model then comes back with
+a 4096-token context, far too small for the agent). To upgrade, pull the new
+image, remove the old container (`docker rm -f lemonade-server`) and run the
+command above again; the volumes keep your models and settings. See the
+[Lemonade Docker guide](https://github.com/lemonade-sdk/lemonade/blob/main/docs/guide/install/docker.md)
+for GPU options and volume-ownership notes when upgrading from older images.
+
 Otherwise you can download the server from Lemonade server it self: (https://github.com/lemonade-sdk/lemonade)
 
 ## Troubleshooting
 
+- **Something isn't working, and I need to see why.**
+  Click the hamburger button (☰) next to the app name in the top bar and pick
+  **Lemonade Server logs** (the server's own live log) or **Lemonade Stand logs**
+  (what this app has been doing). Both can be searched, filtered by level and
+  copied into a bug report. See the [developer guide](docs/DEVELOPER_GUIDE.md#logs).
 - `TypeError: crypto.hash is not a function`
   Use Node 22.12+ (or newer). This error appears when running with older Node
   versions.

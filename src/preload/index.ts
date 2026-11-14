@@ -3,8 +3,10 @@ import type {
   AgentEvent,
   ApprovalDecision,
   ChatMessage,
+  LogEntry,
   PitcherEvent,
-  RendererApi
+  RendererApi,
+  ServerLogEvent
 } from '@shared/types'
 
 // The only bridge between the sandboxed renderer and the Node-privileged main
@@ -239,6 +241,37 @@ const api: RendererApi = {
 
   async openFolderInExplorer(folderPath: string): Promise<void> {
     return await ipcRenderer.invoke('explorer:open-folder', folderPath)
+  },
+
+  getAppLogs() {
+    return ipcRenderer.invoke('logs:app-get')
+  },
+
+  onAppLog(handler: (entry: LogEntry) => void): () => void {
+    const listener = (_event: unknown, payload: LogEntry): void => handler(payload)
+    ipcRenderer.on('logs:app-entry', listener)
+    // The main process only forwards new lines while someone is listening, so
+    // the app's own (chatty) logging costs nothing when no viewer is open.
+    ipcRenderer.send('logs:app-subscribe')
+    return () => {
+      ipcRenderer.removeListener('logs:app-entry', listener)
+      ipcRenderer.send('logs:app-unsubscribe')
+    }
+  },
+
+  revealAppLogFile(): Promise<boolean> {
+    return ipcRenderer.invoke('logs:reveal-app-file')
+  },
+
+  onServerLog(handler: (event: ServerLogEvent) => void): () => void {
+    const listener = (_event: unknown, payload: ServerLogEvent): void => handler(payload)
+    ipcRenderer.on('logs:server-event', listener)
+    // Subscribing opens the server's log stream; closing the viewer closes it.
+    ipcRenderer.send('logs:server-subscribe')
+    return () => {
+      ipcRenderer.removeListener('logs:server-event', listener)
+      ipcRenderer.send('logs:server-unsubscribe')
+    }
   }
 }
 

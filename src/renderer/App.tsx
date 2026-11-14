@@ -28,9 +28,11 @@ import {
   ArrowDownTrayIcon,
   ClockIcon,
   CpuChipIcon,
+  DocumentTextIcon,
   LightBulbIcon,
   MicrophoneIcon,
   PitcherIcon,
+  ServerIcon,
   ShieldCheckIcon,
   ShieldSlashIcon,
   SpeakerWaveIcon,
@@ -39,6 +41,7 @@ import {
   StopSpeakingIcon,
   TrashIcon
 } from './icons'
+import { LogViewer } from './LogViewer'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 
@@ -64,9 +67,22 @@ type ServerStatus = 'checking' | 'online' | 'offline'
 type Theme = 'light' | 'dark'
 
 // The overlays that can be shown one-at-a-time: top-bar/footer popovers
-// (connection, context, usage) and the full modals (pantry, models, history).
-// A single active-panel value enforces that opening one closes any other.
-type Panel = 'connection' | 'context' | 'replycap' | 'usage' | 'pantry' | 'models' | 'history' | 'pitchers' | 'menu' | 'loaded'
+// (connection, context, usage) and the full modals (pantry, models, history,
+// and the two log viewers opened from the hamburger menu). A single
+// active-panel value enforces that opening one closes any other.
+type Panel =
+  | 'connection'
+  | 'context'
+  | 'replycap'
+  | 'usage'
+  | 'pantry'
+  | 'models'
+  | 'history'
+  | 'pitchers'
+  | 'menu'
+  | 'loaded'
+  | 'serverlogs'
+  | 'applogs'
 
 // Convert base64 audio from lemond's TTS into a playable object URL. Rejects
 // (rather than swallowing) so callers can surface a playback failure instead of
@@ -1401,6 +1417,24 @@ export function App(): JSX.Element {
                   🌙 Dark
                 </button>
                 <div className="brand-menu-divider" />
+                <span className="brand-menu-label">Logs</span>
+                <button
+                  className="brand-menu-item"
+                  onClick={() => setActivePanel('serverlogs')}
+                  role="menuitem"
+                  title="Live output from the Lemonade server"
+                >
+                  <ServerIcon /> Lemonade Server logs
+                </button>
+                <button
+                  className="brand-menu-item"
+                  onClick={() => setActivePanel('applogs')}
+                  role="menuitem"
+                  title="What Lemonade Stand itself has been doing"
+                >
+                  <DocumentTextIcon /> Lemonade Stand logs
+                </button>
+                <div className="brand-menu-divider" />
                 <div className="brand-menu-version">
                   {version ? `Lemonade Stand ${version}` : 'Lemonade Stand'}
                 </div>
@@ -1969,6 +2003,8 @@ export function App(): JSX.Element {
           </aside>
         </div>
       )}
+      {activePanel === 'serverlogs' && <LogViewer source="server" onClose={closePanel} />}
+      {activePanel === 'applogs' && <LogViewer source="app" onClose={closePanel} />}
       {activePanel === 'models' && (
         <Models
           onClose={closePanel}

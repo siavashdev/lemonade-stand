@@ -31,10 +31,18 @@ import {
   writeSettings
 } from './config'
 import { LemonadeClient } from './lemonade/client'
+import { ServerLogStream } from './lemonade/logs'
 import { McpManager } from './mcp/manager'
 import { Agent, type ApproveFn, type AskNapkinFn, type ContinueFn, type ProposePitcherFn } from './agent/loop'
 import { PitcherScheduler } from './pitcher/scheduler'
-import { initFileLogging } from './logger'
+import {
+  getAppLogs,
+  getLogFilePath,
+  initFileLogging,
+  installConsoleCapture,
+  recordUiLog,
+  subscribeAppLogs
+} from './logger'
 import {
   clearSessions,
   deleteSession,
@@ -43,6 +51,11 @@ import {
   renameSession,
   writeSession
 } from './history/store'
+
+// Start capturing console output for the in-app log viewer before anything else
+// logs, so the app's startup is part of what the viewer can show.
+installConsoleCapture()
+
 const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
 // Resolve the directory that holds the app's `config/` files (catalog, phrases,
@@ -212,7 +225,26 @@ function createWindow(): void {
   // raise desktop notifications.
   mainWindow = window
   window.on('closed', () => {
-    if (mainWindow === window) mainWindow = null
+    if (mainWindow === window) {
+      stopLogFeeds()
+      mainWindow = null
+    }
+  })
+
+  // Relay the renderer's console into the app log, so errors thrown in the UI
+  // show up in the in-app viewer next to the main process's own output.
+  window.webContents.on('console-message', (event) => {
+    recordUiLog(event.level, event.message)
+  })
+  window.webContents.on('render-process-gone', (_event, details) => {
+    stopLogFeeds()
+    console.error(`[ui] the renderer process went away (${details.reason})`)
+  })
+  // React cleanup is not guaranteed on a hard reload. Stop both feeds when the
+  // main frame navigates so an abandoned server WebSocket cannot reconnect in
+  // the background with no viewer listening.
+  window.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) stopLogFeeds()
   })
 
   // Window controls driven by the renderer's custom top bar.
@@ -476,8 +508,20 @@ ipcMain.on('agent:cancel-transcribe', () => currentTranscribeAbort?.abort())
 // (electron-vite dev / preview) reports 'dev' since it isn't a tagged release.
 ipcMain.handle('app:version', () => (app.isPackaged ? `v${app.getVersion()}` : 'dev'))
 
-// Health probe for the renderer's server-status indicator.
-ipcMain.handle('agent:check-health', () => lemonade.health())
+// Health probe for the renderer's server-status indicator. The renderer polls
+// this every few seconds, so only a *change* (online <-> unreachable) is logged,
+// which is what the log viewer needs to explain "why did the app stop working".
+let lastServerOnline: boolean | null = null
+ipcMain.handle('agent:check-health', async () => {
+  const online = await lemonade.health()
+  if (online !== lastServerOnline) {
+    lastServerOnline = online
+    const target = lemonade.connection.baseUrl
+    if (online) console.info(`[server] Lemonade server is online (${target})`)
+    else console.warn(`[server] Lemonade server is unreachable (${target})`)
+  }
+  return online
+})
 
 // The Lemonade server connection (base URL + API key) the app currently targets,
 // so the renderer's connection editor can show what's active.
@@ -497,6 +541,9 @@ ipcMain.handle(
     }
     lemonade.setConnection(baseUrl, apiKey)
     writeSettings(appPath, { baseUrl, apiKey })
+    console.info(`[server] connection changed to ${baseUrl}${apiKey ? ' (with an API key)' : ''}`)
+    // An open server-log viewer must follow the app to the new server.
+    if (serverLogs.active) serverLogs.start()
     // Reconnect so the Lemonade Gateway ("/mcp") picks up the new key/origin:
     // its Authorization header is derived from this connection, so a stale
     // connection would keep failing with "Invalid or missing API key".
@@ -508,6 +555,52 @@ ipcMain.handle(
 
 // Effective context-window budget, surfaced in the UI.
 ipcMain.handle('agent:context-info', () => lemonade.getContextInfo())
+
+// --- Log viewers --------------------------------------------------------------
+// The hamburger menu opens two read-only viewers: one for the Lemonade server's
+// own logs and one for this app's. Neither costs anything while closed: the app
+// log is a small in-memory ring (see logger.ts) that is only forwarded to the
+// renderer while a viewer is subscribed, and the server's log stream is only
+// connected while its viewer is open.
+
+// Relay a main-process event to the renderer, if it's still there.
+function sendToRenderer(channel: string, payload: unknown): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
+}
+
+ipcMain.handle('logs:app-get', () => ({ entries: getAppLogs(), filePath: getLogFilePath() }))
+
+let stopAppLogFeed: (() => void) | null = null
+ipcMain.on('logs:app-subscribe', () => {
+  stopAppLogFeed?.()
+  stopAppLogFeed = subscribeAppLogs((entry) => sendToRenderer('logs:app-entry', entry))
+})
+ipcMain.on('logs:app-unsubscribe', () => {
+  stopAppLogFeed?.()
+  stopAppLogFeed = null
+})
+
+// Show the on-disk log file (only exists when file logging is on: LOG_LEVEL=debug).
+ipcMain.handle('logs:reveal-app-file', () => {
+  const file = getLogFilePath()
+  if (!file) return false
+  shell.showItemInFolder(file)
+  return true
+})
+
+// The Lemonade server's own logs, streamed from its /logs/stream WebSocket.
+const serverLogs = new ServerLogStream(
+  () => lemonade.connection,
+  (event) => sendToRenderer('logs:server-event', event)
+)
+ipcMain.on('logs:server-subscribe', () => serverLogs.start())
+ipcMain.on('logs:server-unsubscribe', () => serverLogs.stop())
+
+function stopLogFeeds(): void {
+  stopAppLogFeed?.()
+  stopAppLogFeed = null
+  serverLogs.stop()
+}
 
 // Per-category breakdown of how the current conversation fills the context
 // window, for the live usage indicator. The tool catalogue and system prompt
@@ -743,6 +836,9 @@ ipcMain.handle('agent:send', async (event, messages: ChatMessage[]) => {
   // blocks the loop, and a TTS failure only logs.
   const emit = (agentEvent: AgentEvent): void => {
     send(agentEvent)
+    // Failures always reach the log (not just in debug), so the viewer can
+    // explain why a turn ended in an error.
+    if (agentEvent.type === 'error') console.error(`[agent] ${agentEvent.message}`)
     // Trace every agent event to the log (when debug is on) so a run can be
     // reconstructed from the log file: tool calls, plan updates, budget, etc.
     debugLog(`[agent] ${describeEvent(agentEvent)}`)
@@ -909,6 +1005,7 @@ async function pourPitcher(p: Pitcher): Promise<PitcherRunResult> {
     } else if (e.type === 'error') {
       emittedError = e.message
       entries.push({ kind: 'error', text: e.message })
+      console.error(`[pitcher] "${p.name}": ${e.message}`)
     }
     // Mirror to the window if the user happens to be watching.
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent:event', e)
@@ -1256,5 +1353,6 @@ app.on('window-all-closed', async () => {
 
 app.on('before-quit', async () => {
   scheduler.stop()
+  serverLogs.stop()
   await mcp.closeAll()
 })
