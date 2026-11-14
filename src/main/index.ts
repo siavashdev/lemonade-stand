@@ -1,4 +1,14 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  Notification,
+  shell
+} from 'electron'
+import type { WebContents } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -10,6 +20,7 @@ import type {
   McpServerConfig,
   McpServerState,
   Napkin,
+  OptionValues,
   Pitcher,
   PitcherEvent,
   PitcherRunResult,
@@ -20,11 +31,13 @@ import {
   loadCatalog,
   loadConfig,
   loadThinkingPhrases,
+  optionsForServer,
   pathForServer,
   readPitchers,
   readServers,
   seedLocalOverrides,
   serverFromCatalog,
+  withServerOptions,
   withServerPath,
   writePitchers,
   writeServers,
@@ -32,6 +45,8 @@ import {
 } from './config'
 import { LemonadeClient } from './lemonade/client'
 import { ServerLogStream } from './lemonade/logs'
+import { MonitorHub } from './lemonade/monitor'
+import { parseBackendTiming } from './lemonade/inference'
 import { McpManager } from './mcp/manager'
 import { Agent, type ApproveFn, type AskNapkinFn, type ContinueFn, type ProposePitcherFn } from './agent/loop'
 import { PitcherScheduler } from './pitcher/scheduler'
@@ -144,10 +159,10 @@ debugLog(
 // name). Cleared on restart so a persistent grant never outlives the process.
 const sessionAllow = new Set<string>()
 
-// Session-scoped "bypass approvals" override. When on, tool calls are approved
-// without prompting regardless of config.requireApproval. The renderer turns it
-// on/off from the status bar and resets it to false whenever a new conversation
-// starts, so a bypass never carries over into a fresh session.
+// "Allow all" permission mode. When on, tool calls are approved without
+// prompting regardless of config.requireApproval. The renderer owns the
+// persisted choice (footer Permissions menu) and pushes it here on startup and
+// whenever it changes.
 let bypassApprovals = false
 
 // In-flight approval prompts: id -> resolver. The agent loop awaits these;
@@ -196,6 +211,29 @@ function resolveIconPath(): string {
   return join(base, 'resources', iconFile)
 }
 
+// The packaged ID must match electron-builder's appId. Dev runs get their own ID
+// so Windows doesn't tie the electron.exe process to the installed app's
+// shortcut and cached taskbar icon.
+const APP_USER_MODEL_ID = app.isPackaged ? 'com.lemonadestand.app' : 'com.lemonadestand.app.dev'
+
+// Windows picks the taskbar button's icon from the window's AppUserModel
+// properties (and any Start Menu shortcut sharing the ID) before it falls back
+// to the window icon, so a stale association shows electron.exe's icon in dev
+// and can do the same for a packaged build. Pin the icon on every window
+// explicitly instead of relying on those lookups.
+function applyWindowIcon(win: BrowserWindow): void {
+  const iconPath = resolveIconPath()
+  const image = nativeImage.createFromPath(iconPath)
+  if (image.isEmpty()) {
+    console.warn(`[icon] could not load the app icon from ${iconPath}`)
+    return
+  }
+  win.setIcon(image)
+  if (process.platform === 'win32') {
+    win.setAppDetails({ appId: APP_USER_MODEL_ID, appIconPath: iconPath, appIconIndex: 0 })
+  }
+}
+
 function createWindow(): void {
   const window = new BrowserWindow({
     width: 1000,
@@ -221,10 +259,16 @@ function createWindow(): void {
     }
   })
 
+  applyWindowIcon(window)
+
   // Keep a handle so headless Pitcher pours can mirror events to the UI and
   // raise desktop notifications.
   mainWindow = window
+  mainWebContentsId = window.webContents.id
   window.on('closed', () => {
+    // The detached Monitoring window is part of this app: closing the main
+    // window must not leave it (and so the process) running.
+    if (monitorWindow && !monitorWindow.isDestroyed()) monitorWindow.close()
     if (mainWindow === window) {
       stopLogFeeds()
       mainWindow = null
@@ -298,6 +342,7 @@ function serverStates(): McpServerState[] {
       connected: rt?.connected ?? false,
       toolCount: rt?.toolCount ?? 0,
       path: entry ? pathForServer(entry, s) : undefined,
+      options: entry ? optionsForServer(entry, s) : undefined,
       error: rt?.error
     }
   })
@@ -404,22 +449,23 @@ ipcMain.handle('agent:thinking-phrases', () => loadThinkingPhrases(appPath))
 
 ipcMain.handle(
   'servers:configure',
-  async (_event, id: string, opts: { enabled: boolean; path?: string }) => {
+  async (_event, id: string, opts: { enabled: boolean; path?: string; options?: OptionValues }) => {
     const all = readServers(appPath)
     const idx = all.findIndex((s) => s.id === id)
     if (idx >= 0) {
       let updated = { ...all[idx], enabled: opts.enabled }
-      // If a new path was supplied, rewrite the server's `{{path}}` arg so the
-      // user can change the folder after the server was first configured.
-      if (opts.path) {
+      // If a new path or option values were supplied, rewrite the matching args
+      // so the user can change them after the server was first configured.
+      if (opts.path || opts.options) {
         const entry = loadCatalog(appPath, bundledConfigPath).find((c) => c.id === id)
-        if (entry) updated = withServerPath(entry, updated, opts.path)
+        if (entry && opts.path) updated = withServerPath(entry, updated, opts.path)
+        if (entry && opts.options) updated = withServerOptions(entry, updated, opts.options)
       }
       all[idx] = updated
     } else {
       const entry = loadCatalog(appPath, bundledConfigPath).find((c) => c.id === id)
       if (!entry) throw new Error(`Unknown tool "${id}"`)
-      const built = serverFromCatalog(entry, opts.path)
+      const built = serverFromCatalog(entry, opts.path, opts.options)
       built.enabled = opts.enabled
       all.push(built)
     }
@@ -544,6 +590,7 @@ ipcMain.handle(
     console.info(`[server] connection changed to ${baseUrl}${apiKey ? ' (with an API key)' : ''}`)
     // An open server-log viewer must follow the app to the new server.
     if (serverLogs.active) serverLogs.start()
+    if (monitor.active) monitor.restart()
     // Reconnect so the Lemonade Gateway ("/mcp") picks up the new key/origin:
     // its Authorization header is derived from this connection, so a stale
     // connection would keep failing with "Invalid or missing API key".
@@ -596,10 +643,112 @@ const serverLogs = new ServerLogStream(
 ipcMain.on('logs:server-subscribe', () => serverLogs.start())
 ipcMain.on('logs:server-unsubscribe', () => serverLogs.stop())
 
+// --- Monitoring ---------------------------------------------------------------
+// Resource and inference statistics from the server's /system-stats and /stats,
+// plus this app's own measurements of its chat requests (the server doesn't
+// count Omni collections). Polled only while a window is showing it: the
+// status-bar pill in the main window (whenever it is visible), the Monitoring
+// overlay, or the detached window opened from it. All share one poller and its
+// recent history.
+const monitorLogs = new ServerLogStream(
+  () => lemonade.connection,
+  (event) => {
+    // The server logs llama.cpp's exact timing for every model call, including
+    // the ones an Omni collection makes internally, which /stats never counts.
+    if (event.type !== 'entry') return
+    const timing = parseBackendTiming(event.entry.message)
+    if (timing) lemonade.inference.recordTiming(timing)
+  }
+)
+const monitor = new MonitorHub(
+  (path, timeoutMs) => lemonade.getJson(path, timeoutMs),
+  () => lemonade.inference.snapshot(),
+  180,
+  1000,
+  { onStart: () => monitorLogs.start(), onStop: () => monitorLogs.stop() }
+)
+const monitorViewers = new WeakSet<WebContents>()
+ipcMain.on('monitor:subscribe', (event) => {
+  const viewer = event.sender
+  monitor.subscribe(viewer.id, (sample) => {
+    if (!viewer.isDestroyed()) viewer.send('monitor:sample', sample)
+  })
+  if (!monitorViewers.has(viewer)) {
+    monitorViewers.add(viewer)
+    // A window that closes without unsubscribing must not keep the poller alive.
+    const id = viewer.id
+    viewer.once('destroyed', () => monitor.unsubscribe(id))
+  }
+})
+ipcMain.on('monitor:unsubscribe', (event) => monitor.unsubscribe(event.sender.id))
+
+// The detached Monitoring window: an ordinary, independent OS window the user
+// can drag next to (or outside) the main one, so chat and graphs show together.
+let monitorWindow: BrowserWindow | null = null
+
+function openMonitorWindow(at?: { x: number; y: number }): void {
+  if (monitorWindow && !monitorWindow.isDestroyed()) {
+    if (monitorWindow.isMinimized()) monitorWindow.restore()
+    if (at) monitorWindow.setPosition(at.x, at.y)
+    monitorWindow.show()
+    monitorWindow.focus()
+    return
+  }
+  const win = new BrowserWindow({
+    ...(at ?? {}),
+    width: 560,
+    height: 800,
+    minWidth: 380,
+    minHeight: 360,
+    title: 'Lemonade Stand – Monitoring',
+    backgroundColor: '#0f1a1c',
+    icon: resolveIconPath(),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.mjs'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      additionalArguments: [`--app-debug=${config.debug ? '1' : '0'}`]
+    }
+  })
+  applyWindowIcon(win)
+  monitorWindow = win
+  win.on('closed', () => {
+    if (monitorWindow === win) monitorWindow = null
+  })
+  // Keep a click on a link from navigating this window away from the monitor.
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  const devUrl = process.env['ELECTRON_RENDERER_URL']
+  if (devUrl) void win.loadURL(`${devUrl}#monitor`)
+  else void win.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'monitor' })
+}
+
+// Pop the Monitoring overlay out into its own window (or focus it if it exists).
+// `position` (screen coordinates) is set when the user dragged the overlay out of
+// the app, so the window appears where they let go.
+ipcMain.handle('monitor:pop-out', (_event, position?: { x?: unknown; y?: unknown }) => {
+  const x = Number(position?.x)
+  const y = Number(position?.y)
+  openMonitorWindow(Number.isFinite(x) && Number.isFinite(y) ? { x: Math.round(x), y: Math.round(y) } : undefined)
+})
+// Bring an already-open detached window forward. False when there isn't one, so
+// the caller shows the in-app overlay instead.
+ipcMain.handle('monitor:focus-window', () => {
+  if (!monitorWindow || monitorWindow.isDestroyed()) return false
+  openMonitorWindow()
+  return true
+})
+
+// The main window's webContents id, kept so its Monitoring overlay can be
+// dropped from the feed after the window itself is gone.
+let mainWebContentsId = -1
+
 function stopLogFeeds(): void {
   stopAppLogFeed?.()
   stopAppLogFeed = null
   serverLogs.stop()
+  // Only the main window's overlay: a detached window keeps running.
+  monitor.unsubscribe(mainWebContentsId)
 }
 
 // Per-category breakdown of how the current conversation fills the context
@@ -690,9 +839,8 @@ ipcMain.on('agent:approve', (_event, id: string, decision: ApprovalDecision) => 
   }
 })
 
-// Toggle the session-scoped approval bypass. The renderer sets it true when the
-// user turns on "bypass approvals" and false when a new conversation starts, so
-// the override never outlives the session that enabled it.
+// Set the "Allow all" permission mode. The renderer sends the user's persisted
+// choice on startup and again whenever they change it in the Permissions menu.
 ipcMain.on('agent:set-bypass', (_event, enabled: boolean) => {
   bypassApprovals = enabled
 })
@@ -1283,7 +1431,7 @@ app.whenReady().then(async () => {
   // windows under one entry. This MUST match electron-builder's appId so the
   // running window maps to the installed shortcut (otherwise the taskbar falls
   // back to a blank/generic icon).
-  if (process.platform === 'win32') app.setAppUserModelId('com.lemonadestand.app')
+  if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
 
   // Drop the native application menu (File, Edit, View, …). The frameless
   // window has no menu bar to show it in anyway.
@@ -1354,5 +1502,6 @@ app.on('window-all-closed', async () => {
 app.on('before-quit', async () => {
   scheduler.stop()
   serverLogs.stop()
+  monitor.stop()
   await mcp.closeAll()
 })

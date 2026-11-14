@@ -4,6 +4,8 @@ import type {
   ApprovalDecision,
   ChatMessage,
   LogEntry,
+  MonitorSample,
+  OptionValues,
   PitcherEvent,
   RendererApi,
   ServerLogEvent
@@ -16,6 +18,9 @@ const api: RendererApi = {
   // Read from the --app-debug=<0|1> argument injected via webPreferences
   // additionalArguments, so the renderer knows the debug flag synchronously.
   debug: process.argv.some((a) => a === '--app-debug=1'),
+
+  // The OS the app runs on, so the Pantry can show platform-specific defaults.
+  platform: process.platform,
 
   sendMessage(messages: ChatMessage[]): Promise<void> {
     return ipcRenderer.invoke('agent:send', messages)
@@ -161,7 +166,10 @@ const api: RendererApi = {
     return ipcRenderer.invoke('servers:list')
   },
 
-  configureServer(id: string, opts: { enabled: boolean; path?: string }) {
+  configureServer(
+    id: string,
+    opts: { enabled: boolean; path?: string; options?: OptionValues }
+  ) {
     return ipcRenderer.invoke('servers:configure', id, opts)
   },
 
@@ -272,6 +280,25 @@ const api: RendererApi = {
       ipcRenderer.removeListener('logs:server-event', listener)
       ipcRenderer.send('logs:server-unsubscribe')
     }
+  },
+
+  onMonitorSample(handler: (sample: MonitorSample) => void): () => void {
+    const listener = (_event: unknown, payload: MonitorSample): void => handler(payload)
+    ipcRenderer.on('monitor:sample', listener)
+    // Polling only runs while the Monitor is open.
+    ipcRenderer.send('monitor:subscribe')
+    return () => {
+      ipcRenderer.removeListener('monitor:sample', listener)
+      ipcRenderer.send('monitor:unsubscribe')
+    }
+  },
+
+  popOutMonitor(position?: { x: number; y: number }): Promise<void> {
+    return ipcRenderer.invoke('monitor:pop-out', position)
+  },
+
+  focusMonitorWindow(): Promise<boolean> {
+    return ipcRenderer.invoke('monitor:focus-window')
   }
 }
 

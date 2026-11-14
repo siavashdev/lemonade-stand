@@ -5,7 +5,10 @@ and lets it call **tools** provided by **MCP servers**. You stock those tools
 from the **Pantry** (the Market), then just talk to the agent in plain English and
 it decides when to reach for a tool. Before any tool runs, you'll see an
 **approval card** (Allow once / Always allow / Deny) unless you've turned
-approvals off.
+approvals off. To skip the cards entirely, open the **Permissions** menu in the
+footer and choose **Allow all** (⚠): every tool and sub-tool then runs without
+asking. **Manual permissions** is the default; the choice is remembered between
+conversations and restarts.
 
 This guide lists every tool that ships in the Pantry, how to enable it, and
 copy‑paste example prompts you can use to test each one.
@@ -189,6 +192,46 @@ example a folder the **Filesystem** server can access.
 
 ---
 
+### 9. Playwright Browser 🎭 (`playwright`)
+
+Lets the agent drive a real browser: open pages, click, type, read a page
+snapshot, and take screenshots. The server is bundled, so no Node or `uvx` on
+your PATH is needed, but it drives a browser that must already be on your
+machine. The app doesn't ship one.
+
+**Settings** (on the Pantry card; change them any time and click **Apply settings**):
+
+- **Browser**: *Google Chrome*, *Microsoft Edge* (the default on Windows, where
+  it's built in), or *Playwright Chromium*. Chrome and Edge use the copy you
+  already have. Playwright Chromium needs a one-time download: run
+  `npx @playwright/mcp install-browser chrome-for-testing` in a terminal.
+- **Private session**: on by default. The browser keeps its profile in memory only,
+  like an incognito window, so cookies and sign-ins are gone when the tool
+  restarts, and it never touches your own browser's profile. Untick it only if
+  you want logins to persist between sessions.
+- **Run headless**: off by default, so a visible window opens and you can watch
+  the agent work. Tick it to hide the window.
+
+If the chosen browser isn't found, the tool returns an error that says what to
+install, and the agent will relay it.
+
+**Tools:** `browser_navigate`, `browser_snapshot`, `browser_click`,
+`browser_type`, `browser_take_screenshot`, `browser_tabs`, `browser_close`, and more.
+
+**Try these prompts:**
+
+- "**Open** https://example.com in the browser and tell me what the page says."
+- "Go to https://news.ycombinator.com and list the top 3 headlines."
+- "Take a **screenshot** of https://modelcontextprotocol.io."
+- "Search for *lemonade recipe* on https://duckduckgo.com and summarize the first result."
+
+> The browser acts with this app's privileges and can reach any site you can.
+> Review each approval card. The private session limits what carries over
+> between sessions, but anything you sign in to during one is still reachable by
+> the agent until the tool restarts.
+
+---
+
 ## Pitchers
 (scheduled tasks) run prompts fresh on a timer or when the app opens
   - **On-open trigger**: runs once each app launch
@@ -216,6 +259,7 @@ example a folder the **Filesystem** server can access.
 | Time | "What time is it in Tokyo?" | No |
 | SQLite | "List the tables in my database." | `.db` file |
 | Word Documents | "Save a short menu as `menu.docx` in my allowed folder." | No (tell it where to save) |
+| Playwright Browser | "Open example.com and tell me what it says." | No (needs Chrome, Edge, or Playwright Chromium) |
 
 ---
 
@@ -254,4 +298,51 @@ Click the hamburger button (☰) next to **Lemonade Stand** in the top bar:
 
 In either one you can search, filter by level, pause scrolling with **Follow**,
 and **Copy** the lines shown to paste into a bug report.
+
+### Watching resource usage and inference speed
+
+The **Monitoring pill** at the left of the status bar always shows the model's
+state at a glance: a dot that pulses green while it's working (grey when idle),
+the live speed in tokens per second with a small graph, and CPU. Click it, or
+pick **Monitoring** in the hamburger menu (☰), to see what the Lemonade server is
+doing right now, without relying on fan noise or the log stream:
+
+- **Inference** shows whether the model is generating (and how many requests),
+  the live generation speed in tokens per second, the last request's speed and
+  time to first token, and totals. A graph of the live speed covers the last
+  three minutes.
+- **System** graphs CPU, memory, GPU, GPU memory and NPU usage. A card says
+  *n/a* when the server or your hardware doesn't report that number.
+- **Recent requests** lists each request that finishes, with its speed, time to
+  first token and token counts.
+
+The server's own timings are used whenever it logs them, so for most Omni
+requests the speed and token counts are exact. Figures marked **~** are the
+fallback: estimates made by Lemonade Stand from the text the model streams back
+(roughly four characters per token, ignoring the audio and images Omni sends
+inline), with the speed worked out over the whole request, including any time
+spent running tools. Treat those as a guide, not a benchmark. Note that **Last
+prompt** counts the prompt tokens the model actually had to process, so it can
+be small when most of the prompt was already cached.
+
+**Keep the chat in view:** the Monitoring window covers the app, so move it into
+its own window. Either click the pop-out button (the arrow in its top-right
+corner), or drag its title bar toward the edge of the app: once it hangs well
+over the edge, a banner says "Release to open Monitoring in its own window", and
+letting go opens it as a separate window where you dropped it. (A window can't
+draw outside itself, so the drag works by passing the edge rather than leaving
+the screen.) Place that window beside, or outside, the main one
+and you can chat and watch the graphs at the same time. It follows the app's
+light/dark theme, keeps the graphs you already had, and closes with the app.
+Clicking **Monitoring** again brings it forward.
+
+While a request is running, the generation-speed graph is shaded, so you can see
+work in progress even when no speed is available yet. An Omni model sends its
+whole reply at once, so there is no speed to show while it works: the **Live
+speed** reading appears for a few seconds when each model call finishes, and the
+call's speed stays under **Last request**.
+
+It updates once a second while the app window is visible. Server figures need a Lemonade server
+that provides the `/stats` and `/system-stats` endpoints; on an older one, those
+cards show *n/a* (the app's own estimates still work).
 

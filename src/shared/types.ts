@@ -152,6 +152,30 @@ export interface CatalogEntry {
   pathLabel?: string
   /** Upstream docs link. */
   homepage?: string
+  /** User-adjustable settings shown on the Pantry card. Each one maps to extra
+   * launcher args appended to the server's `args`. */
+  options?: CatalogOption[]
+}
+
+/** A user-selected value for each of a catalog entry's options, keyed by
+ * option id: the chosen choice `value` for a select, a boolean for a toggle. */
+export type OptionValues = Record<string, string | boolean>
+
+/** One user-adjustable setting on a catalog entry. */
+export interface CatalogOption {
+  id: string
+  label: string
+  /** Help text shown under the control. */
+  hint?: string
+  type: 'select' | 'toggle'
+  /** `select` only: the mutually exclusive choices. */
+  choices?: { value: string; label: string; hint?: string; args: string[] }[]
+  /** `toggle` only: args added while the toggle is on. */
+  args?: string[]
+  /** Initial value: a choice `value` for a select, a boolean for a toggle. */
+  default: string | boolean
+  /** Overrides `default` per `process.platform` (e.g. `win32`). */
+  defaultByPlatform?: Record<string, string | boolean>
 }
 
 /** Effective context-window budget for the current chat model, surfaced so the
@@ -268,6 +292,8 @@ export interface McpServerState {
   toolCount: number
   /** For path-based stdio servers, the folder/file currently configured. */
   path?: string
+  /** For servers whose catalog entry has options, the values currently in use. */
+  options?: OptionValues
   /** Populated when the last connection attempt failed. */
   error?: string
 }
@@ -482,6 +508,54 @@ export type ServerLogEvent =
   // One new line, as the server emits it.
   | { type: 'entry'; entry: LogEntry }
 
+/** Host resource usage from the server's `/system-stats`. Any field is null when
+ * the server (or the machine's drivers) doesn't report it. */
+export interface SystemStats {
+  cpuPercent: number | null
+  /** System RAM in use, GiB. */
+  memoryGb: number | null
+  gpuPercent: number | null
+  /** GPU memory in use, GiB (shared system memory on APUs). */
+  vramGb: number | null
+  /** Total memory of the primary GPU, GiB, when known. */
+  vramTotalGb: number | null
+  gpuName: string | null
+  npuPercent: number | null
+}
+
+/** Inference activity from the server's `/stats`: the most recent request plus
+ * counters since the server started, and what is streaming right now. */
+export interface InferenceStats {
+  /** Generation speed of the last request (tokens/s). */
+  tokensPerSecond: number | null
+  /** Time to first token of the last request, seconds. */
+  timeToFirstToken: number | null
+  inputTokens: number | null
+  outputTokens: number | null
+  promptTokens: number | null
+  cacheTokens: number | null
+  requestCountTotal: number | null
+  inputTokensTotal: number | null
+  outputTokensTotal: number | null
+  /** Streams producing output in the last few seconds. */
+  activeRequests: number | null
+  /** Estimated combined generation rate of those streams (tokens/s). */
+  liveTokensPerSecond: number | null
+  /** The last-request figures are this app's own estimates, because the server
+   * doesn't keep statistics for that kind of request (Omni collections). */
+  estimated: boolean
+}
+
+/** One poll of the server's monitoring endpoints. `online` is false when
+ * neither answered; a null half means just that endpoint isn't available. */
+export interface MonitorSample {
+  /** Wall-clock time of the poll, ms since the epoch. */
+  time: number
+  online: boolean
+  system: SystemStats | null
+  inference: InferenceStats | null
+}
+
 /** The app's own retained log lines, plus the on-disk log file when file
  * logging is enabled (LOG_LEVEL=debug), so the viewer can reveal it. */
 export interface AppLogsSnapshot {
@@ -494,6 +568,8 @@ export interface RendererApi {
   /** Verbose diagnostic logging flag (LOG_LEVEL=debug), for renderer-side
    * console tracing. Read synchronously at startup. */
   debug: boolean
+  /** The OS the app runs on (`process.platform`), for platform-specific defaults. */
+  platform: string
   sendMessage(messages: ChatMessage[]): Promise<void>
   /** Halt the in-flight agent turn started by `sendMessage`. */
   cancelMessage(): void
@@ -512,11 +588,10 @@ export interface RendererApi {
   onServersChanged(handler: () => void): () => void
   /** Answer a pending `tool_approval_request`. */
   respondApproval(id: string, decision: ApprovalDecision): void
-  /** Turn the session-scoped approval bypass on or off. While on, tool calls
-   * are approved without prompting. Scoped to the current conversation: the
-   * renderer resets it to false whenever a new session starts, so it never
-   * outlives the session and a fresh session falls back to the default
-   * (env/settings.json) approval behavior. */
+  /** Turn "Allow all" on or off. While on, every tool call (including each
+   * sub-tool of a multi-tool server) is approved without prompting. The renderer
+   * owns the persisted choice and re-sends it on startup; false restores the
+   * default (env/settings.json) approval behavior. */
   setBypassApprovals(enabled: boolean): void
   /** Answer a pending `step_limit_request`: true to let the agent keep going
    * for another budget, false to stop it. */
@@ -589,7 +664,10 @@ export interface RendererApi {
   listServers(): Promise<McpServerState[]>
   /** Enable/disable a tool (adding it from the catalogue if new). Returns the
    * refreshed server states after reconnecting. */
-  configureServer(id: string, opts: { enabled: boolean; path?: string }): Promise<McpServerState[]>
+  configureServer(
+    id: string,
+    opts: { enabled: boolean; path?: string; options?: OptionValues }
+  ): Promise<McpServerState[]>
   /** Remove a configured server entirely. Returns refreshed states. */
   removeServer(id: string): Promise<McpServerState[]>
   /** Open a native picker so the user can choose a folder or file path. */
@@ -643,4 +721,13 @@ export interface RendererApi {
    * status event, the server's backlog, then each new line. The returned
    * function closes the stream. */
   onServerLog(handler: (event: ServerLogEvent) => void): () => void
+  /** Poll the Lemonade server's resource and inference statistics about once a
+   * second while subscribed. The returned function stops the polling. */
+  onMonitorSample(handler: (sample: MonitorSample) => void): () => void
+  /** Open Monitoring in its own window that can be moved outside the main one,
+   * or bring it forward if it's already open. */
+  popOutMonitor(position?: { x: number; y: number }): Promise<void>
+  /** Bring the detached Monitoring window forward. Resolves false when it isn't
+   * open, so the caller can show the in-app overlay instead. */
+  focusMonitorWindow(): Promise<boolean>
 }

@@ -1,5 +1,5 @@
 {
-  "$schema-note": "The Pantry's Market: a curated list of MCP servers the user can stock. Enabling one materializes an entry in servers.json. `{{path}}` in args is replaced with a folder/file the user picks. Add your own entries here to grow the Market.",
+  "$schema-note": "The Pantry's Market: a curated list of MCP servers the user can stock. Enabling one materializes an entry in servers.json. `{{path}}` in args is replaced with a folder/file the user picks. An entry's `options` become settings on its Pantry card, each adding launcher args (a `select` picks one choice's args, a `toggle` adds its args when on). Add your own entries here to grow the Market.",
   "entries": [
     {
       "id": "lemonade",
@@ -45,6 +45,61 @@
       "command": "uvx",
       "args": ["mcp-server-fetch"],
       "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch"
+    },
+    {
+      "id": "playwright",
+      "name": "Playwright Browser",
+      "blurb": "Let the agent drive a real browser: open pages, click, type, read page snapshots, and take screenshots. The browser window is visible so you can watch.",
+      "category": "Web",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp"],
+      "options": [
+        {
+          "id": "browser",
+          "label": "Browser",
+          "type": "select",
+          "default": "chrome",
+          "defaultByPlatform": { "win32": "msedge" },
+          "choices": [
+            {
+              "value": "chrome",
+              "label": "Google Chrome",
+              "hint": "Uses the Chrome you already have installed.",
+              "args": ["--browser", "chrome"]
+            },
+            {
+              "value": "msedge",
+              "label": "Microsoft Edge",
+              "hint": "Uses the Edge you already have installed (built into Windows).",
+              "args": ["--browser", "msedge"]
+            },
+            {
+              "value": "chromium",
+              "label": "Playwright Chromium",
+              "hint": "Needs a one-time download: run `npx @playwright/mcp install-browser chrome-for-testing` in a terminal.",
+              "args": ["--browser", "chromium"]
+            }
+          ]
+        },
+        {
+          "id": "private",
+          "label": "Private session (don't keep cookies or logins)",
+          "type": "toggle",
+          "default": true,
+          "hint": "Keeps the browser profile in memory only, like an incognito window, so sign-ins and cookies are gone when the tool restarts. Untick it to keep logins between sessions.",
+          "args": ["--isolated"]
+        },
+        {
+          "id": "headless",
+          "label": "Run headless (hide the browser window)",
+          "type": "toggle",
+          "default": false,
+          "args": ["--headless"]
+        }
+      ],
+      "note": "The server is bundled with the app, so it runs offline without Node installed, but it drives a browser that must already be on this machine: Chrome, Edge, or Playwright's own Chromium (pick one in the card's settings; Edge is the default on Windows). If the browser isn't found, the tools report an error naming what to install. It opens a visible window unless you tick headless, runs in a private (in-memory) profile unless you untick that, and acts with this app's privileges, so approve its actions carefully.",
+      "homepage": "https://github.com/microsoft/playwright-mcp"
     },
     {
       "id": "git",

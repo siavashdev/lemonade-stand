@@ -1,7 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { LemonadeClient } from '../src/main/lemonade/client'
+import { LemonadeClient, mergeSystemMessages } from '../src/main/lemonade/client'
+
+describe('mergeSystemMessages()', () => {
+  it('folds compaction-pinned system messages into one leading message', () => {
+    const out = mergeSystemMessages([
+      { role: 'system', content: 'base' },
+      { role: 'system', content: 'summary' },
+      { role: 'system', content: 'plan' },
+      { role: 'user', content: 'hi' }
+    ])
+    expect(out).toEqual([
+      { role: 'system', content: 'base\n\nsummary\n\nplan' },
+      { role: 'user', content: 'hi' }
+    ])
+  })
+
+  it('moves a mid-conversation system message to the front', () => {
+    const out = mergeSystemMessages([
+      { role: 'user', content: 'hi' },
+      { role: 'system', content: 'late' }
+    ])
+    expect(out.map((m) => m.role)).toEqual(['system', 'user'])
+  })
+
+  it('returns an already-valid list untouched', () => {
+    const msgs = [
+      { role: 'system' as const, content: 'base' },
+      { role: 'user' as const, content: 'hi' }
+    ]
+    expect(mergeSystemMessages(msgs)).toBe(msgs)
+  })
+})
 
 // Exercises the real LemonadeClient against a tiny in-process stand-in for a
 // Lemonade server (v2026.46-style behaviour): Omni collections that aren't fully

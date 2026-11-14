@@ -49,3 +49,90 @@ C:\Users\<username>\AppData\Roaming\lemonade-stand\logs\
 When it is on, the **Lemonade Stand logs** viewer shows the file's path with a
 **Show file** button, and the file starts with everything logged before it was
 opened.
+
+# Monitor
+
+A **Monitoring pill** in the status bar ([`src/renderer/MonitorPill.tsx`](../src/renderer/MonitorPill.tsx):
+idle/working dot, live tok/s with a sparkline, CPU) is always visible; clicking it,
+or **Monitoring** in the hamburger menu, opens
+[`src/renderer/MonitorPanel.tsx`](../src/renderer/MonitorPanel.tsx), which graphs
+the server's host usage and inference speed. Both read samples through
+[`monitorFeed.ts`](../src/renderer/monitorFeed.ts): the main process keys its
+subscribers by window, so each window holds a single subscription that the pill
+and the view share (late listeners get the samples already received replayed).
+The pill keeps its own state so the once-a-second updates don't re-render the
+app, and it stops listening while the window is hidden or minimized.
+
+- [`MonitorPoller`](../src/main/lemonade/monitor.ts) in the main process reads
+  the server's `GET /system-stats` (CPU, RAM, GPU, GPU memory, NPU) and
+  `GET /stats` (last-request tokens/s and time to first token, token counters,
+  and the `live` block with active streams and an estimated tokens/s) once a
+  second, through the same authenticated client as the rest of the app. Polls
+  never overlap.
+- **Omni models are invisible to `/stats`.** The server runs an Omni collection
+  with its own internal loop and never updates those counters (verified: a chat
+  to a plain model moves `/stats`, the same chat to `LMX-Omni-5.5B-Lite` does
+  not). So [`InferenceTracker`](../src/main/lemonade/inference.ts) measures the
+  app's own streamed requests: `LemonadeClient.chat()` reports each request and
+  its streamed text (content, reasoning, tool-call arguments). `mergeInference`
+  combines both sources: every app request makes the view show *Generating* and
+  feeds the live rate, but only requests the server doesn't count (collections)
+  are added to the totals and the "last request" figures, so nothing is counted
+  twice. The app's last request is preferred only if it finished after the
+  server's counter last moved.
+- **Exact Omni timings come from the server log.** llama.cpp prints a
+  `print_timing` line for every model call (`prompt eval time = … / N tokens (…
+  tokens per second)` and `eval time = …`), Omni's internal calls included, and
+  the log WebSocket (`/logs/stream`) carries them. While monitoring is active the
+  main process runs a second `ServerLogStream` (started and stopped by
+  `MonitorHub`'s `lifecycle` hooks) and `parseBackendTiming` feeds each line to
+  `InferenceTracker.recordTiming`. A timing belongs to the request in flight, or
+  to one that ended in the last 3 s (the line can arrive just after the reply).
+  A request with decode timings reports their sums, exact, and a call's speed is
+  also held on the live reading for 4 s, which is the only live signal an Omni
+  reply allows. A request without any (another backend, or no log access) falls
+  back to estimates: ~4 characters per token with base64 runs (inline
+  audio/images) ignored and the rate taken over the whole request. Those carry
+  `estimated: true` and the UI marks them with `~`. The prompt figure is the
+  prompt tokens llama.cpp processed, so a prefix-cache hit makes it small.
+- Each poll becomes one `MonitorSample` ([`src/shared/types.ts`](../src/shared/types.ts))
+  pushed over the `monitor:sample` IPC channel. An endpoint that fails or isn't
+  there leaves its half of the sample `null`, and any field the server reports
+  as null stays null, so the UI shows *n/a* rather than zero.
+- `MonitorHub` shares one poller between every window showing monitoring data and
+  keeps the last 180 samples (about three minutes). A new viewer first gets that
+  history replayed, then live samples; the poller runs only while at least one
+  window is subscribed (so, while the app window is visible, because of the pill)
+  and drops history that's more than 5 s old when it starts again. Changing the
+  server in **Connection** restarts it with fresh history.
+- **Detached window.** The overlay's pop-out button calls `monitor:pop-out`, and
+  so does dragging the overlay's title bar: pointer capture keeps
+  `pointermove`/`pointerup` coming even outside the window and the overlay follows
+  the pointer. A renderer can't paint outside its own window, so rather than
+  requiring the pointer to leave it, the drag detaches once the panel hangs more
+  than 80 px over any window edge (or the pointer is outside); a fixed banner
+  announces it, and releasing sends the pointer's screen position (`screenX/Y`)
+  so the window opens there. Chromium treats
+  `-webkit-app-region: drag` as a union across the page regardless of stacking,
+  so `.mon-panel` opts out with `no-drag` (it can sit over the top bar). The main
+  process opens an ordinary framed `BrowserWindow`
+  (`openMonitorWindow` in [`src/main/index.ts`](../src/main/index.ts)) that loads the
+  same page with `#monitor`; [`main.tsx`](../src/renderer/main.tsx) then renders
+  just `MonitorPanel variant="windowed"`. It is not parented to the main window,
+  so it can be dragged anywhere. It follows the theme through the `storage`
+  event, and is closed with the main window so the app can quit. `monitor:focus-window`
+  lets the top button bring an existing window forward instead of opening the overlay.
+- The renderer draws the charts as plain SVG
+  ([`src/renderer/monitorFormat.ts`](../src/renderer/monitorFormat.ts)). The
+  generation-speed chart also shades the samples where `activeRequests > 0`
+  (`chartBands`): an Omni reply arrives in one piece, so its live rate stays at
+  zero while it works and the shading is the only visible sign of activity.
+  `/stats` only describes the latest request, so a finished request is
+  detected when the request counter goes up and its numbers are added to
+  **Recent requests**; requests that finish within one poll of each other
+  show as one row.
+- Opening or closing it never touches a running chat: the overlay is only
+  renderer UI state, the agent loop lives in the main process, and the poller
+  just issues read-only `GET`s. Because the overlay covers the window, it shows
+  a notice if a tool call is waiting for approval in the chat; the detached
+  window has no such problem.

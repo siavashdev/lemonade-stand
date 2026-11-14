@@ -16,6 +16,7 @@ import type {
   Napkin,
   NapkinChoice,
   NapkinKind,
+  OptionValues,
   Pitcher,
   PitcherEvent,
   PitcherProposal,
@@ -31,12 +32,14 @@ import {
   ClockIcon,
   CpuChipIcon,
   DocumentTextIcon,
+  ChartBarIcon,
+  ChevronUpIcon,
+  ExclamationTriangleIcon,
   LightBulbIcon,
   MicrophoneIcon,
   PitcherIcon,
   ServerIcon,
   ShieldCheckIcon,
-  ShieldSlashIcon,
   SpeakerWaveIcon,
   SpeakerXMarkIcon,
   StopIcon,
@@ -44,6 +47,8 @@ import {
   TrashIcon
 } from './icons'
 import { LogViewer } from './LogViewer'
+import { MonitorPanel } from './MonitorPanel'
+import { MonitorPill } from './MonitorPill'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 
@@ -51,6 +56,8 @@ import DOMPurify from 'dompurify'
 // the same visual stream so you can watch the agent think. Aliased to the shared
 // TranscriptEntry so a conversation can be saved and restored verbatim.
 type Entry = TranscriptEntry
+
+type PermissionMode = 'manual' | 'allow-all'
 
 // A tool call awaiting the user's approval decision.
 interface PendingApproval {
@@ -83,8 +90,10 @@ type Panel =
   | 'pitchers'
   | 'menu'
   | 'loaded'
+  | 'permissions'
   | 'serverlogs'
   | 'applogs'
+  | 'monitor'
 
 // Convert base64 audio from lemond's TTS into a playable object URL. Rejects
 // (rather than swallowing) so callers can surface a playback failure instead of
@@ -334,10 +343,14 @@ export function App(): JSX.Element {
   // True while a synthesized reply is actively playing, so the UI can offer a
   // stop control (spoken replies are otherwise unstoppable once started).
   const [speaking, setSpeaking] = useState(false)
-  // Session-scoped approval bypass. While on, tool calls run without prompting
-  // for the current conversation only; starting a new session resets it so the
-  // default (env/settings.json) approval behavior applies again.
-  const [bypassApprovals, setBypassApprovals] = useState(false)
+  // Permission mode picked in the footer. 'manual' keeps the default
+  // (env/settings.json) approval behavior; 'allow-all' runs every tool and
+  // sub-tool without prompting. The choice persists across conversations and
+  // restarts, and is pushed to the main process on startup and on every change.
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(() =>
+    localStorage.getItem('permissionMode') === 'allow-all' ? 'allow-all' : 'manual'
+  )
+  const allowAll = permissionMode === 'allow-all'
   const [recording, setRecording] = useState(false)
   const [transcribing, setTranscribing] = useState(false)
   const [approvals, setApprovals] = useState<PendingApproval[]>([])
@@ -384,6 +397,14 @@ export function App(): JSX.Element {
   const [activePanel, setActivePanel] = useState<Panel | null>(null)
   const togglePanel = (p: Panel): void => setActivePanel((cur) => (cur === p ? null : p))
   const closePanel = (): void => setActivePanel(null)
+  // Open Monitoring: bring the detached window forward if the user already
+  // popped it out, otherwise show the in-app overlay.
+  const openMonitoring = (): void => {
+    window.api
+      .focusMonitorWindow()
+      .then((focused) => (focused ? closePanel() : setActivePanel('monitor')))
+      .catch(() => setActivePanel('monitor'))
+  }
   // The footer popovers (context, replycap, usage, connection, loaded) are
   // small anchored dropdowns with no backdrop of their own , unlike the
   // full-screen panels (Pantry, History, Models, …) which already close on a
@@ -395,13 +416,15 @@ export function App(): JSX.Element {
   const usagePanelRef = useRef<HTMLDivElement>(null)
   const connectionPanelRef = useRef<HTMLDivElement>(null)
   const modelsControlPanelRef = useRef<HTMLDivElement>(null)
+  const permissionsPanelRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const refByPanel: Partial<Record<Panel, React.RefObject<HTMLDivElement | null>>> = {
       context: contextPanelRef,
       replycap: replyCapPanelRef,
       usage: usagePanelRef,
       connection: connectionPanelRef,
-      loaded: modelsControlPanelRef
+      loaded: modelsControlPanelRef,
+      permissions: permissionsPanelRef
     }
     const ref = activePanel ? refByPanel[activePanel] : undefined
     if (!ref) return
@@ -1066,23 +1089,23 @@ export function App(): JSX.Element {
     if (!next) stopSpeaking()
   }
 
-  // Flip the session-scoped approval bypass. When on, the main process approves
-  // tool calls without prompting; the state is reset to off whenever a new
-  // session starts (see the effect keyed on sessionId).
-  function toggleBypassApprovals(): void {
-    const next = !bypassApprovals
-    setBypassApprovals(next)
-    window.api.setBypassApprovals(next)
+  // Switch permission mode. Allow all makes the main process approve every tool
+  // call without prompting, so any prompts already on screen are approved too.
+  function choosePermissionMode(mode: PermissionMode): void {
+    setPermissionMode(mode)
+    localStorage.setItem('permissionMode', mode)
+    window.api.setBypassApprovals(mode === 'allow-all')
+    if (mode === 'allow-all') {
+      for (const p of approvals) decide(p.id, 'approve')
+    }
+    closePanel()
   }
 
-  // Lock the approval bypass to the session that enabled it: any time the live
-  // conversation changes (new session, opening/deleting one, clearing history),
-  // reset the bypass so a fresh session falls back to the default approval
-  // behavior configured via the env/settings.json file.
+  // The main process starts in manual mode, so push the persisted choice once.
   useEffect(() => {
-    setBypassApprovals(false)
-    window.api.setBypassApprovals(false)
-  }, [sessionId])
+    window.api.setBypassApprovals(permissionMode === 'allow-all')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Halt the spoken reply currently playing (if any). Pausing fires the 'pause'
   // listener wired up in the audio handler, which clears the ref and state.
@@ -1417,6 +1440,15 @@ export function App(): JSX.Element {
                   aria-checked={theme === 'dark'}
                 >
                   🌙 Dark
+                </button>
+                <div className="brand-menu-divider" />
+                <button
+                  className="brand-menu-item"
+                  onClick={openMonitoring}
+                  role="menuitem"
+                  title="Live resource usage and inference speed"
+                >
+                  <ChartBarIcon /> Monitoring
                 </button>
                 <div className="brand-menu-divider" />
                 <span className="brand-menu-label">Logs</span>
@@ -1761,6 +1793,56 @@ export function App(): JSX.Element {
       </div>
 
       <footer className="statusbar">
+        <div className="permissions-control" ref={permissionsPanelRef}>
+          <button
+            className={`permissions-toggle ${allowAll ? 'on' : ''}`}
+            onClick={() => togglePanel('permissions')}
+            aria-expanded={activePanel === 'permissions'}
+            aria-haspopup="menu"
+            title={
+              allowAll
+                ? 'Allow all: every tool and sub-tool runs without asking'
+                : 'Manual permissions: asks when approval settings don\u2019t apply'
+            }
+          >
+            {allowAll ? <ExclamationTriangleIcon /> : <ShieldCheckIcon />}
+            {allowAll ? 'Allow all' : 'Manual permissions'}
+            <ChevronUpIcon />
+          </button>
+          {activePanel === 'permissions' && (
+            <div className="permissions-pop" role="menu" aria-label="Permissions">
+              <div className="permissions-pop-head">Permissions</div>
+              <button
+                className={`permissions-option ${!allowAll ? 'active' : ''}`}
+                role="menuitemradio"
+                aria-checked={!allowAll}
+                onClick={() => choosePermissionMode('manual')}
+              >
+                <ShieldCheckIcon />
+                <span className="permissions-option-text">
+                  <span className="permissions-option-name">Manual permissions</span>
+                  <span className="permissions-option-desc">
+                    Asks when approval settings don’t apply
+                  </span>
+                </span>
+              </button>
+              <button
+                className={`permissions-option warn ${allowAll ? 'active' : ''}`}
+                role="menuitemradio"
+                aria-checked={allowAll}
+                onClick={() => choosePermissionMode('allow-all')}
+              >
+                <ExclamationTriangleIcon />
+                <span className="permissions-option-text">
+                  <span className="permissions-option-name">Allow all</span>
+                  <span className="permissions-option-desc">
+                    Runs every tool and sub-tool without asking
+                  </span>
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
         {context !== null && (
           <div className="context-control statusbar-item" ref={contextPanelRef}>
             <button
@@ -1831,6 +1913,7 @@ export function App(): JSX.Element {
             )}
           </div>
         )}
+        <MonitorPill onOpen={openMonitoring} />
         <div className="statusbar-right">
           <div className="context-control statusbar-item server-connection" ref={connectionPanelRef}>
             <button
@@ -1874,7 +1957,10 @@ export function App(): JSX.Element {
                     : 'Choose the model the agent runs on'
               }
             >
-              <CpuChipIcon /> Models{context?.model ? ` (${context.model})` : ''}
+              <CpuChipIcon />{' '}
+              <span className="statusbar-btn-label">
+                Models{context?.model ? ` (${context.model})` : ''}
+              </span>
               {downloadPercent != null && (
                 <span className="statusbar-tag">↓ {downloadPercent}%</span>
               )}
@@ -1910,21 +1996,6 @@ export function App(): JSX.Element {
               />
             )}
           </div>
-          <button
-            className={`bypass-toggle ${bypassApprovals ? 'on' : ''}`}
-            onClick={toggleBypassApprovals}
-            title={
-              bypassApprovals
-                ? 'Bypassing tool approvals for this session , click to require approvals again.\nResets when you start a new conversation.'
-                : 'Tool approvals enforced , click to bypass them for this session only.\nResets when you start a new conversation.'
-            }
-            aria-pressed={bypassApprovals}
-            aria-label={
-              bypassApprovals ? 'Approvals bypassed (this session)' : 'Approvals enforced'
-            }
-          >
-            {bypassApprovals ? <ShieldSlashIcon /> : <ShieldCheckIcon />}
-          </button>
           <button
             className={`speak-toggle ${speaking ? 'stop-speaking' : speak ? 'on' : ''}`}
             onClick={() => (speaking ? stopSpeaking() : void toggleSpeak())}
@@ -2007,6 +2078,16 @@ export function App(): JSX.Element {
       )}
       {activePanel === 'serverlogs' && <LogViewer source="server" onClose={closePanel} />}
       {activePanel === 'applogs' && <LogViewer source="app" onClose={closePanel} />}
+      {activePanel === 'monitor' && (
+        <MonitorPanel
+          onClose={closePanel}
+          onPopOut={(position) => {
+            void window.api.popOutMonitor(position)
+            closePanel()
+          }}
+          awaitingApproval={approvals.length > 0}
+        />
+      )}
       {activePanel === 'models' && (
         <Models
           onClose={closePanel}
@@ -4024,7 +4105,7 @@ function PantryCard({
   entry: CatalogEntry
   state: McpServerState | undefined
   busy: boolean
-  onConfigure: (opts: { enabled: boolean; path?: string }) => void
+  onConfigure: (opts: { enabled: boolean; path?: string; options?: OptionValues }) => void
   onRemove: () => void
 }): JSX.Element {
   const [path, setPath] = useState('')
@@ -4033,6 +4114,22 @@ function PantryCard({
   const configured = Boolean(state)
   const enabled = state?.enabled ?? false
   const isPathBased = Boolean(entry.needsPath)
+
+  // Option values being edited. Start from the platform defaults, then follow
+  // whatever the configured server is actually using.
+  const entryOptions = entry.options ?? []
+  const defaults = useMemo<OptionValues>(() => {
+    const out: OptionValues = {}
+    for (const o of entryOptions) out[o.id] = o.defaultByPlatform?.[window.api.platform] ?? o.default
+    return out
+  }, [entry])
+  const [optionValues, setOptionValues] = useState<OptionValues>(defaults)
+  const savedOptions = JSON.stringify(state?.options ?? {})
+  useEffect(() => {
+    setOptionValues({ ...defaults, ...(JSON.parse(savedOptions) as OptionValues) })
+  }, [defaults, savedOptions])
+  const optionsChanged =
+    configured && entryOptions.some((o) => optionValues[o.id] !== (state?.options?.[o.id] ?? defaults[o.id]))
 
   // Once configured, seed the field with the folder the server is actually
   // using so the user can see and change it (rather than it disappearing).
@@ -4095,6 +4192,53 @@ function PantryCard({
           </div>
         )}
 
+        {entryOptions.length > 0 && (
+          <div className="card-options">
+            {entryOptions.map((o) => {
+              const picked = o.choices?.find((c) => c.value === optionValues[o.id])
+              const hint = o.type === 'select' ? picked?.hint ?? o.hint : o.hint
+              return (
+                <div key={o.id} className="card-option">
+                  {o.type === 'toggle' ? (
+                    <label className="card-option-toggle">
+                      <input
+                        type="checkbox"
+                        checked={optionValues[o.id] === true}
+                        onChange={(e) => setOptionValues({ ...optionValues, [o.id]: e.target.checked })}
+                      />
+                      {o.label}
+                    </label>
+                  ) : (
+                    <label className="card-option-select">
+                      <span>{o.label}</span>
+                      <select
+                        value={String(optionValues[o.id])}
+                        onChange={(e) => setOptionValues({ ...optionValues, [o.id]: e.target.value })}
+                      >
+                        {(o.choices ?? []).map((c) => (
+                          <option key={c.value} value={c.value}>
+                            {c.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {hint && <div className="card-option-hint">{hint}</div>}
+                </div>
+              )
+            })}
+            {optionsChanged && (
+              <button
+                className="btn-on btn-inline"
+                disabled={busy}
+                onClick={() => onConfigure({ enabled, options: optionValues })}
+              >
+                {busy ? 'Updating…' : 'Apply settings'}
+              </button>
+            )}
+          </div>
+        )}
+
         {entry.homepage && (
           <a className="card-link" href={entry.homepage} target="_blank" rel="noreferrer">
             Learn more ↗
@@ -4107,7 +4251,13 @@ function PantryCard({
           <button
             className="btn-on"
             disabled={busy || (isPathBased ? !path.trim() : false)}
-            onClick={() => onConfigure({ enabled: true, path: path.trim() || undefined })}
+            onClick={() =>
+              onConfigure({
+                enabled: true,
+                path: path.trim() || undefined,
+                options: entryOptions.length > 0 ? optionValues : undefined
+              })
+            }
           >
             {busy ? 'Adding…' : 'Add'}
           </button>

@@ -857,25 +857,108 @@ body {
   }
 }
 
-.bypass-toggle {
+/* Footer permissions dropdown (Manual permissions / Allow all), pinned to the far
+   left of the status bar. Opens upward, anchored to its left edge. */
+.permissions-control {
+  position: relative;
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  border-radius: 6px;
-  padding: 5px 8px;
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
 }
 
-/* When bypassing approvals, warn with the danger colour so the relaxed guard
-   is obvious at a glance. */
-.bypass-toggle.on {
+.permissions-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.permissions-toggle svg {
+  font-size: 14px;
+}
+
+.permissions-toggle:hover,
+.permissions-toggle[aria-expanded='true'] {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* Allow all disables the approval guard, so warn with the danger colour. */
+.permissions-toggle.on {
   border-color: var(--danger, #d9534f);
   color: var(--danger, #d9534f);
+}
+
+.permissions-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 290px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+  padding: 6px;
+  z-index: 40;
+}
+
+.permissions-pop-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 4px 8px 6px;
+}
+
+.permissions-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px;
+  cursor: pointer;
+}
+
+.permissions-option > svg {
+  font-size: 16px;
+  margin-top: 2px;
+  flex: none;
+}
+
+.permissions-option:hover,
+.permissions-option.active {
+  background: var(--accent-soft);
+}
+
+.permissions-option.warn > svg {
+  color: var(--danger, #d9534f);
+}
+
+.permissions-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.permissions-option-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.permissions-option-desc {
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .pantry-toggle {
@@ -906,6 +989,60 @@ body {
    connected" text so the top bar stays tidy. */
 .pantry-toggle-primary {
   position: relative;
+}
+
+/* Status-bar Monitoring pill: a dot that pulses green while the model works, its
+   live speed with a sparkline, and CPU. Click opens the full Monitoring view. */
+.monitor-pill {
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.7;
+  flex: 0 0 auto;
+}
+
+.monitor-pill.working {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.monitor-pill.working .monitor-dot {
+  background: var(--ok);
+  opacity: 1;
+  box-shadow: 0 0 6px var(--ok);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.monitor-pill.offline .monitor-dot {
+  background: #f85149;
+  opacity: 1;
+}
+
+.monitor-spark {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.monitor-spark path {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+  opacity: 0.7;
+}
+
+.monitor-pill.working .monitor-spark path {
+  stroke: var(--accent);
+  opacity: 1;
+}
+
+.monitor-pill-cpu {
+  color: var(--muted);
 }
 
 .tools-badge {
@@ -939,6 +1076,28 @@ body {
 .statusbar-item {
   position: relative;
   display: inline-flex;
+}
+
+/* The footer must stay a single row at any supported window width: controls never
+   wrap their text or shrink. The model name is the one flexible piece and is
+   truncated instead (see .statusbar-btn-label); the window's minimum width keeps
+   the rest from overflowing. */
+.statusbar button,
+.statusbar .monitor-pill {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.statusbar-btn-label {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.statusbar-item,
+.permissions-control,
+.statusbar-right {
+  flex-shrink: 0;
 }
 
 /* Lower-traffic status/config controls (server connection, model picker, voice
@@ -1188,12 +1347,6 @@ body {
 /* The footer speaker toggle is smaller than the top-bar variant to sit neatly
    inline with the text-sized status controls around it. */
 .statusbar-right .speak-toggle {
-  font-size: 14px;
-  padding: 3px 7px;
-}
-
-/* Match the footer approval-bypass toggle to the speaker toggle's footer size. */
-.statusbar-right .bypass-toggle {
   font-size: 14px;
   padding: 3px 7px;
 }
@@ -2420,6 +2573,46 @@ body {
 .btn-inline {
   padding: 3px 10px !important;
   font-size: 11px !important;
+}
+
+.card-options {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.card-option-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.card-option-select select {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.card-option-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.card-option-hint {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* Quick-access filter chips at the top of the Models panel. */
@@ -3862,6 +4055,285 @@ button.server-status:hover {
 .logs-state.closed .logs-dot {
   background: #f85149;
   box-shadow: 0 0 6px #f8514988;
+}
+
+/* --- Monitoring (hamburger menu -> Monitoring) -----------------------------------
+   Reuses the log viewer's modal; the body is a scrolling grid of chart cards. */
+.mon-panel {
+  height: min(86vh, 860px);
+  /* The overlay can sit over the top bar's window-drag region; keep it draggable
+     by its own title bar instead of moving the window. */
+  -webkit-app-region: no-drag;
+}
+
+/* Detached window: the panel is the whole window, with no modal chrome. */
+.mon-panel.windowed {
+  width: 100vw;
+  height: 100vh;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
+}
+
+/* The title bar drags the overlay; letting go outside the app detaches it. */
+.mon-panel:not(.windowed) .pantry-head {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.mon-panel.dragging {
+  cursor: grabbing;
+  opacity: 0.92;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  animation: none;
+}
+
+.mon-panel.will-detach {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+.mon-panel.will-detach .pantry-sub {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Fixed to the window, since the panel itself can be dragged mostly off-screen. */
+.mon-detach-hint {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 700;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.mon-head-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.mon-head-actions .pantry-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mon-head-actions .pantry-close:first-child:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.mon-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 16px 16px;
+  background: var(--bg);
+}
+
+.mon-section {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.mon-activity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.mon-activity.busy {
+  color: var(--ok);
+}
+
+.mon-activity.busy .logs-dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.mon-banner {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
+  font-size: 12px;
+}
+
+.mon-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.mon-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.mon-tile-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mon-tile-value {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.mon-tile-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mon-grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 10px;
+}
+
+.mon-card {
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.mon-card.wide {
+  grid-column: 1 / -1;
+}
+
+.mon-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.mon-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mon-card-value {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.mon-card-chart {
+  position: relative;
+  margin-top: 6px;
+}
+
+.mon-chart {
+  display: block;
+  width: 100%;
+  height: 80px;
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.mon-card.wide .mon-chart {
+  height: 130px;
+}
+
+.mon-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Shading for the moments a request was running; the card's own colour, faint. */
+.mon-band {
+  fill: currentColor;
+  opacity: 0.1;
+}
+
+.mon-area {
+  fill: currentColor;
+  opacity: 0.18;
+}
+
+.mon-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.mon-axis {
+  position: absolute;
+  top: 3px;
+  left: 6px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.mon-card-note,
+.mon-empty {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mon-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mon-table th,
+.mon-table td {
+  padding: 5px 8px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+}
+
+.mon-table th:first-child,
+.mon-table td:first-child {
+  text-align: left;
+}
+
+.mon-table th {
+  color: var(--muted);
+  font-weight: 600;
 }
 
 

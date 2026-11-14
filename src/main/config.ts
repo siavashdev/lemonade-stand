@@ -1,6 +1,12 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { CatalogEntry, McpServerConfig, Pitcher } from '@shared/types'
+import type {
+  CatalogEntry,
+  CatalogOption,
+  McpServerConfig,
+  OptionValues,
+  Pitcher
+} from '@shared/types'
 
 // Minimal .env loader, avoids a dependency. Parses KEY=VALUE lines, ignores
 // comments/blank lines, and does not override variables already in the real
@@ -433,8 +439,13 @@ export function loadCatalog(cwd: string, bundledCwd: string = cwd): CatalogEntry
 }
 
 /** Build a concrete server config from a catalogue entry, substituting the
- * chosen filesystem path into any `{{path}}` placeholders. */
-export function serverFromCatalog(entry: CatalogEntry, path?: string): McpServerConfig {
+ * chosen filesystem path into any `{{path}}` placeholders and applying the
+ * entry's options (the defaults for any not supplied). */
+export function serverFromCatalog(
+  entry: CatalogEntry,
+  path?: string,
+  options?: OptionValues
+): McpServerConfig {
   if (entry.transport === 'http') {
     return {
       id: entry.id,
@@ -445,7 +456,7 @@ export function serverFromCatalog(entry: CatalogEntry, path?: string): McpServer
     }
   }
   const fill = (s: string): string => (path ? s.replace('{{path}}', path) : s)
-  return {
+  const server: McpServerConfig = {
     id: entry.id,
     transport: 'stdio',
     command: entry.command ?? '',
@@ -453,6 +464,88 @@ export function serverFromCatalog(entry: CatalogEntry, path?: string): McpServer
     env: entry.env,
     enabled: true
   }
+  return entry.options?.length ? withServerOptions(entry, server, options ?? {}) : server
+}
+
+/** Args a given option value contributes to a server's launcher args. */
+function optionArgs(option: CatalogOption, value: string | boolean | undefined): string[] {
+  if (option.type === 'toggle') return value === true ? (option.args ?? []) : []
+  return option.choices?.find((c) => c.value === value)?.args ?? []
+}
+
+/** Every arg sequence an option can contribute, used to strip it back out. */
+function allOptionArgs(option: CatalogOption): string[][] {
+  const sets = option.type === 'toggle' ? [option.args ?? []] : (option.choices ?? []).map((c) => c.args)
+  return sets.filter((a) => a.length > 0)
+}
+
+/** Index of `needle` as a contiguous run inside `haystack`, or -1. */
+function indexOfRun(haystack: string[], needle: string[]): number {
+  if (needle.length === 0) return -1
+  for (let i = 0; i + needle.length <= haystack.length; i++) {
+    if (needle.every((a, j) => haystack[i + j] === a)) return i
+  }
+  return -1
+}
+
+/** An option's initial value, honouring any per-platform override. */
+function defaultOptionValue(option: CatalogOption, platform: string): string | boolean {
+  return option.defaultByPlatform?.[platform] ?? option.default
+}
+
+/** The default value of every option on `entry` for the given platform. */
+export function defaultOptions(
+  entry: CatalogEntry,
+  platform: string = process.platform
+): OptionValues {
+  const values: OptionValues = {}
+  for (const option of entry.options ?? []) values[option.id] = defaultOptionValue(option, platform)
+  return values
+}
+
+/** The option values a configured server is using, recovered by matching each
+ * option's args against the stored args. Options whose args aren't present fall
+ * back to their default. Undefined when the entry has no options. */
+export function optionsForServer(
+  entry: CatalogEntry,
+  server: McpServerConfig,
+  platform: string = process.platform
+): OptionValues | undefined {
+  if (!entry.options?.length || server.transport !== 'stdio') return undefined
+  const args = server.args ?? []
+  const values = defaultOptions(entry, platform)
+  for (const option of entry.options) {
+    if (option.type === 'toggle') {
+      values[option.id] = indexOfRun(args, option.args ?? []) >= 0
+    } else {
+      const match = (option.choices ?? []).find((c) => indexOfRun(args, c.args) >= 0)
+      if (match) values[option.id] = match.value
+    }
+  }
+  return values
+}
+
+/** Return a copy of `server` whose option args are replaced by those for
+ * `values` (defaults fill any option not supplied). Other args are untouched. */
+export function withServerOptions(
+  entry: CatalogEntry,
+  server: McpServerConfig,
+  values: OptionValues,
+  platform: string = process.platform
+): McpServerConfig {
+  if (server.transport !== 'stdio' || !entry.options?.length) return server
+  const args = (server.args ?? []).slice()
+  for (const option of entry.options) {
+    for (const run of allOptionArgs(option)) {
+      for (let at = indexOfRun(args, run); at >= 0; at = indexOfRun(args, run)) {
+        args.splice(at, run.length)
+      }
+    }
+  }
+  for (const option of entry.options) {
+    args.push(...optionArgs(option, values[option.id] ?? defaultOptionValue(option, platform)))
+  }
+  return { ...server, args }
 }
 
 const PATH_PLACEHOLDER = '{{path}}'
