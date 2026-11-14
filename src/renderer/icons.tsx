@@ -27,6 +27,15 @@ function Icon({ children, ...props }: IconProps & { children: JSX.Element }): JS
   )
 }
 
+// book-open , recipes (saved procedures)
+export function BookOpenIcon(props: IconProps): JSX.Element {
+  return (
+    <Icon {...props}>
+      <path d="M12 6.04c-1.6-1.2-3.7-1.8-6-1.8-1 0-1.9.1-2.8.3-.5.1-.9.6-.9 1.1v11.6c0 .7.7 1.2 1.4 1 .8-.2 1.5-.3 2.3-.3 2.3 0 4.4.6 6 1.8m0-13.7c1.6-1.2 3.7-1.8 6-1.8 1 0 1.9.1 2.8.3.5.1.9.6.9 1.1v11.6c0 .7-.7 1.2-1.4 1-.8-.2-1.5-.3-2.3-.3-2.3 0-4.4.6-6 1.8m0-13.7V19.74" />
+    </Icon>
+  )
+}
+
 // stop , halt an in-flight request (filled rounded square)
 export function StopIcon(props: IconProps): JSX.Element {
   return (

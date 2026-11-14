@@ -22,13 +22,22 @@ import type {
   PitcherProposal,
   PitcherTrigger,
   PlanStep,
+  Recipe,
   SessionSummary,
   TranscriptEntry
 } from '@shared/types'
 import { DAY_NAMES, describeTrigger as describeTriggerLabel } from '@shared/schedule'
 import {
+  buildRecipeAppendix,
+  estimateRecipeTokens,
+  LARGE_RECIPE_CHARS,
+  MAX_RECIPE_CHARS,
+  parseRecipeMarkdown
+} from '@shared/recipes'
+import {
   ArchiveBoxIcon,
   ArrowDownTrayIcon,
+  BookOpenIcon,
   ClockIcon,
   CpuChipIcon,
   DocumentTextIcon,
@@ -88,6 +97,7 @@ type Panel =
   | 'models'
   | 'history'
   | 'pitchers'
+  | 'recipes'
   | 'menu'
   | 'loaded'
   | 'permissions'
@@ -322,6 +332,16 @@ function buildUserContent(
   return parts
 }
 
+// A message the user sent while the agent was mid-turn. It sits in the composer's
+// queue until the agent folds it in (or the turn ends and it is handed back).
+interface QueuedInfluence {
+  id: string
+  text: string
+  attachments?: MessageAttachment[]
+  content: ChatMessage['content']
+  interrupt: boolean
+}
+
 export function App(): JSX.Element {
   const [entries, setEntries] = useState<Entry[]>([])
   const [history, setHistory] = useState<ChatMessage[]>([])
@@ -339,6 +359,10 @@ export function App(): JSX.Element {
   // True while a drag hovers the composer, to show the drop affordance.
   const [dragOver, setDragOver] = useState(false)
   const [busy, setBusy] = useState(false)
+  // Messages sent while a turn is running, waiting for the agent to pick them up.
+  // Mirrored in a ref so the turn's long-lived event listener sees the latest list.
+  const [queuedInfluences, setQueuedInfluences] = useState<QueuedInfluence[]>([])
+  const queuedInfluencesRef = useRef<QueuedInfluence[]>([])
   const [speak, setSpeak] = useState(false)
   // True while a synthesized reply is actively playing, so the UI can offer a
   // stop control (spoken replies are otherwise unstoppable once started).
@@ -457,6 +481,11 @@ export function App(): JSX.Element {
   // auto-generated title once the first exchange has happened.
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [pitchers, setPitchers] = useState<Pitcher[]>([])
+  // Saved recipes (SKILL.md-style procedures). The enabled ones are offered in
+  // the composer's picker so the user can attach one to the next message.
+  const [recipes, setRecipes] = useState<Recipe[]>([])
+  const [attachedRecipeIds, setAttachedRecipeIds] = useState<string[]>([])
+  const [showRecipePicker, setShowRecipePicker] = useState(false)
   // Ids of Pitchers currently pouring in the background, driven by
   // pitcher_started / pitcher_finished events. Backs the sticky "pouring…" bar
   // shown above the composer, each row with its own Stop button.
@@ -648,6 +677,15 @@ export function App(): JSX.Element {
     window.api.listPitchers().then(setPitchers).catch(() => setPitchers([]))
   }
 
+  // Reload the saved recipes, dropping any attached id that no longer exists.
+  function updateRecipes(list: Recipe[]): void {
+    setRecipes(list)
+    setAttachedRecipeIds((ids) => ids.filter((id) => list.some((r) => r.id === id && r.enabled)))
+  }
+  function refreshRecipes(): void {
+    window.api.listRecipes().then(updateRecipes).catch(() => updateRecipes([]))
+  }
+
   // Persist the live conversation (model history + visual transcript) under the
   // current session id. Called by the autosave effect once a turn settles.
   function persistCurrent(): void {
@@ -766,6 +804,7 @@ export function App(): JSX.Element {
     refreshModels()
     refreshSessions()
     refreshPitchers()
+    refreshRecipes()
     window.api.getAppVersion().then(setVersion).catch(() => setVersion(''))
     window.api
       .getThinkingPhrases()
@@ -1090,13 +1129,15 @@ export function App(): JSX.Element {
   }
 
   // Switch permission mode. Allow all makes the main process approve every tool
-  // call without prompting, so any prompts already on screen are approved too.
+  // call and continue past the step limit without prompting, so any prompts
+  // already on screen are answered yes too.
   function choosePermissionMode(mode: PermissionMode): void {
     setPermissionMode(mode)
     localStorage.setItem('permissionMode', mode)
     window.api.setBypassApprovals(mode === 'allow-all')
     if (mode === 'allow-all') {
       for (const p of approvals) decide(p.id, 'approve')
+      if (stepLimit) decideContinue(true)
     }
     closePanel()
   }
@@ -1228,23 +1269,90 @@ export function App(): JSX.Element {
     setAttachments((a) => a.filter((_, i) => i !== index))
   }
 
+  function updateQueuedInfluences(fn: (q: QueuedInfluence[]) => QueuedInfluence[]): void {
+    queuedInfluencesRef.current = fn(queuedInfluencesRef.current)
+    setQueuedInfluences(queuedInfluencesRef.current)
+  }
+
+  // Hand still-queued influences back to the composer so nothing the user typed is
+  // lost when a turn ends (or is stopped) before the agent could apply them.
+  function restoreQueuedInfluences(ids?: string[]): void {
+    const back = queuedInfluencesRef.current.filter((q) => !ids || ids.includes(q.id))
+    if (back.length === 0) return
+    updateQueuedInfluences((q) => q.filter((x) => !back.includes(x)))
+    const text = back
+      .map((q) => q.text)
+      .filter(Boolean)
+      .join('\n\n')
+    if (text) setInput((cur) => [text, cur.trim()].filter(Boolean).join('\n\n'))
+    const atts = back.flatMap((q) => q.attachments ?? [])
+    if (atts.length > 0) setAttachments((a) => [...atts, ...a])
+  }
+
+  // Send the composer's text into the running turn. `interrupt` also aborts the
+  // model call in flight so the agent reacts right away instead of after its
+  // current step.
+  async function influence(interrupt: boolean): Promise<void> {
+    const text = input.trim()
+    const atts = attachments
+    if ((!text && atts.length === 0) || !busy) return
+    const item: QueuedInfluence = {
+      id: crypto.randomUUID(),
+      text,
+      attachments: atts.length > 0 ? atts : undefined,
+      content: buildUserContent(text, atts, fsRoots),
+      interrupt
+    }
+    setInput('')
+    setAttachments([])
+    updateQueuedInfluences((q) => [...q, item])
+    let accepted = false
+    try {
+      accepted = await window.api.influenceMessage(item.id, item.content, interrupt)
+    } catch {
+      // Treated like a rejection below.
+    }
+    if (!accepted) restoreQueuedInfluences([item.id])
+  }
+
   async function send(): Promise<void> {
     const text = input.trim()
     const atts = attachments
+    const attached = recipes.filter((r) => r.enabled && attachedRecipeIds.includes(r.id))
     if ((!text && atts.length === 0) || busy) return
     setInput('')
     setAttachments([])
+    setAttachedRecipeIds([])
+    setShowRecipePicker(false)
     setBusy(true)
     // Clear any previous turn's plan so the sticky bar reflects only this turn.
     setPlan(null)
     setPlanExpanded(false)
 
-    const userMsg: ChatMessage = { role: 'user', content: buildUserContent(text, atts, fsRoots) }
+    // Attached recipes travel with the message (after what the user typed) so the
+    // model follows them this turn and in later turns of the same conversation.
+    const content = buildUserContent(text, atts, fsRoots)
+    const appendix = buildRecipeAppendix(attached)
+    const userContent: string | MessageContentPart[] = !appendix
+      ? content
+      : typeof content === 'string'
+        ? content + appendix
+        : content.map((part, i) =>
+            i === content.findIndex((p) => p.type === 'text') && part.type === 'text'
+              ? { ...part, text: part.text + appendix }
+              : part
+          )
+    const userMsg: ChatMessage = { role: 'user', content: userContent }
     const nextHistory = [...history, userMsg]
     setHistory(nextHistory)
     setEntries((e) => [
       ...e,
-      { kind: 'user', text, attachments: atts.length > 0 ? atts : undefined }
+      {
+        kind: 'user',
+        text,
+        attachments: atts.length > 0 ? atts : undefined,
+        recipes: attached.length > 0 ? attached.map((r) => r.name) : undefined
+      }
     ])
 
     const collected: ChatMessage[] = []
@@ -1287,6 +1395,11 @@ export function App(): JSX.Element {
         setEntries((e) => [
           ...e,
           { kind: 'tool', label: `${event.server} ← ${event.tool}`, detail: event.preview, ok: event.ok }
+        ])
+      } else if (event.type === 'recipe_used') {
+        setEntries((e) => [
+          ...e,
+          { kind: 'tool', label: `recipe → ${event.name}`, detail: 'Loaded recipe instructions', ok: true }
         ])
       } else if (event.type === 'plan_updated') {
         // The model laid out or revised its plan. Drive the sticky plan bar
@@ -1335,16 +1448,37 @@ export function App(): JSX.Element {
         // compacted model-facing history; new assistant turns from this same
         // reply are still appended on 'done'. The visual transcript is kept.
         setHistory(event.messages)
+        // Those messages already include everything collected so far this turn.
+        collected.length = 0
         setEntries((e) => [
           ...e,
           { kind: 'warning', text: 'Compacted older messages to free up context.' }
         ])
+      } else if (event.type === 'influence_applied') {
+        // The agent picked up a message sent mid-turn: move it from the queue
+        // into the transcript at the point it actually took effect.
+        const item = queuedInfluencesRef.current.find((q) => q.id === event.id)
+        if (item) {
+          updateQueuedInfluences((q) => q.filter((x) => x.id !== item.id))
+          collected.push({ role: 'user', content: item.content })
+          setEntries((e) => [...e, { kind: 'user', text: item.text, attachments: item.attachments }])
+        }
+      } else if (event.type === 'completion_interrupted') {
+        // The cut-short reply is gone; settle its live reasoning preview.
+        setEntries((e) => {
+          const last = e[e.length - 1]
+          if (last && last.kind === 'reasoning' && last.streaming) {
+            return [...e.slice(0, -1), { kind: 'reasoning', text: last.text }]
+          }
+          return e
+        })
       } else if (event.type === 'error') {
         setEntries((e) => [...e, { kind: 'error', text: event.message }])
       } else if (event.type === 'done') {
         off()
         setStepLimit(null)
         setHistory((h) => [...h, ...collected])
+        restoreQueuedInfluences()
         setBusy(false)
       }
     })
@@ -1354,6 +1488,7 @@ export function App(): JSX.Element {
     } catch (err) {
       off()
       setEntries((e) => [...e, { kind: 'error', text: String(err) }])
+      restoreQueuedInfluences()
       setBusy(false)
     }
   }
@@ -1496,6 +1631,21 @@ export function App(): JSX.Element {
           </div>
         </div>
         <div className="topbar-right">
+          <button
+            className="pantry-toggle"
+            onClick={() => setActivePanel('recipes')}
+            title="Open Recipes , saved step-by-step procedures the agent can follow for repeatable tasks"
+          >
+            <BookOpenIcon /> Recipes
+            {recipes.filter((r) => r.enabled).length > 0 && (
+              <span
+                className="tools-badge"
+                title={`${recipes.filter((r) => r.enabled).length} active recipe(s)`}
+              >
+                {recipes.filter((r) => r.enabled).length}
+              </span>
+            )}
+          </button>
           <button
             className="pantry-toggle"
             onClick={() => setActivePanel('pitchers')}
@@ -1668,6 +1818,20 @@ export function App(): JSX.Element {
           if (files.length > 0) void addFiles(files)
         }}
       >
+        {queuedInfluences.length > 0 && (
+          <div className="queued-influences">
+            {queuedInfluences.map((q) => (
+              <div key={q.id} className="queued-influence" title={q.text}>
+                <span className="queued-influence-tag">
+                  {q.interrupt ? '⚡ Interrupting' : 'Queued'}
+                </span>
+                <span className="queued-influence-text">
+                  {q.text || `(${q.attachments?.length ?? 0} attachment)`}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="attachments">
             {attachments.map((att, i) => (
@@ -1692,7 +1856,69 @@ export function App(): JSX.Element {
             ))}
           </div>
         )}
+        {attachedRecipeIds.length > 0 && (
+          <div className="attachments">
+            {recipes
+              .filter((r) => attachedRecipeIds.includes(r.id))
+              .map((r) => (
+                <div key={r.id} className="attachment recipe-chip" title={r.description || r.name}>
+                  <span className="attachment-icon" aria-hidden="true">
+                    <BookOpenIcon />
+                  </span>
+                  <span className="attachment-name">{r.name}</span>
+                  <button
+                    className="attachment-remove"
+                    onClick={() =>
+                      setAttachedRecipeIds((ids) => ids.filter((id) => id !== r.id))
+                    }
+                    aria-label={`Remove recipe ${r.name}`}
+                    title="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+          </div>
+        )}
+        {showRecipePicker && (
+          <div className="recipe-picker" role="listbox" aria-label="Attach recipes">
+            {recipes.filter((r) => r.enabled).length === 0 ? (
+              <div className="empty">
+                No enabled recipes yet.{' '}
+                <button className="recipe-link" onClick={() => setActivePanel('recipes')}>
+                  Create one
+                </button>
+              </div>
+            ) : (
+              recipes
+                .filter((r) => r.enabled)
+                .map((r) => (
+                  <label key={r.id} className="pitcher-tool recipe-picker-item" title={r.description}>
+                    <input
+                      type="checkbox"
+                      checked={attachedRecipeIds.includes(r.id)}
+                      onChange={() =>
+                        setAttachedRecipeIds((ids) =>
+                          ids.includes(r.id) ? ids.filter((id) => id !== r.id) : [...ids, r.id]
+                        )
+                      }
+                    />
+                    <span className="pitcher-tool-name">{r.name}</span>
+                  </label>
+                ))
+            )}
+          </div>
+        )}
         <div className="composer-row">
+        <button
+          className={`mic-btn recipe-btn ${attachedRecipeIds.length > 0 ? 'active' : ''}`}
+          onClick={() => setShowRecipePicker((v) => !v)}
+          disabled={busy}
+          aria-label="Attach recipes"
+          title="Attach recipes to this message"
+        >
+          <BookOpenIcon />
+        </button>
         <textarea
           ref={inputRef}
           value={input}
@@ -1701,7 +1927,9 @@ export function App(): JSX.Element {
               ? 'Listening… click the mic again to stop'
               : transcribing
                 ? 'Transcribing your audio…'
-                : 'What do you need help with?'
+                : busy
+                  ? 'Influence the agent… Enter applies it after this step · Ctrl+Enter interrupts now'
+                  : 'What do you need help with?'
           }
           onChange={(e) => setInput(e.target.value)}
           onPaste={(e) => {
@@ -1717,10 +1945,10 @@ export function App(): JSX.Element {
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
-              void send()
+              if (busy) void influence(e.ctrlKey || e.metaKey)
+              else void send()
             }
           }}
-          disabled={busy}
         />
         <button
           className={`mic-btn ${recording ? 'recording' : ''}`}
@@ -1737,6 +1965,26 @@ export function App(): JSX.Element {
         >
           <MicrophoneIcon />
         </button>
+        {busy && (input.trim() || attachments.length > 0) && (
+          <>
+            <button
+              className="send-btn influence-btn"
+              onClick={() => void influence(false)}
+              aria-label="Influence after this step"
+              title="Influence: the agent picks this up after its current step (Enter)"
+            >
+              <span className="send-lemon">🍋</span>
+            </button>
+            <button
+              className="send-btn influence-btn interrupt"
+              onClick={() => void influence(true)}
+              aria-label="Interrupt now"
+              title="Interrupt now: cut short the current reply and apply this immediately (Ctrl+Enter)"
+            >
+              <span className="send-lemon">⚡</span>
+            </button>
+          </>
+        )}
         {busy || transcribing ? (
           <button
             className="send-btn stop-btn"
@@ -1836,7 +2084,7 @@ export function App(): JSX.Element {
                 <span className="permissions-option-text">
                   <span className="permissions-option-name">Allow all</span>
                   <span className="permissions-option-desc">
-                    Runs every tool and sub-tool without asking
+                    Skips tool approvals and keep-going prompts
                   </span>
                 </span>
               </button>
@@ -2026,10 +2274,14 @@ export function App(): JSX.Element {
           onClose={closePanel}
         />
       )}
+      {activePanel === 'recipes' && (
+        <Recipes recipes={recipes} onChanged={updateRecipes} onClose={closePanel} />
+      )}
       {activePanel === 'pitchers' && (
         <Pitchers
           pitchers={pitchers}
           tools={tools}
+          recipes={recipes}
           runningIds={runningPitchers}
           onChanged={setPitchers}
           onOpenSession={openSession}
@@ -2070,6 +2322,7 @@ export function App(): JSX.Element {
                 allowedTools: pitcherProposal.draft.allowedTools
               }}
               tools={tools}
+              recipes={recipes}
               onCancel={cancelProposedPitcher}
               onSave={saveProposedPitcher}
             />
@@ -2661,12 +2914,295 @@ function History({
   )
 }
 
+// The Recipes slide-over: saved, reusable procedures (SKILL.md-style markdown)
+// the agent can follow to resolve repeatable tasks faster. Only each recipe's
+// description reaches the model up front; it loads the full body on demand.
+function Recipes({
+  recipes,
+  onChanged,
+  onClose
+}: {
+  recipes: Recipe[]
+  onChanged: (list: Recipe[]) => void
+  onClose: () => void
+}): JSX.Element {
+  const [editing, setEditing] = useState<Recipe | null>(null)
+  const [query, setQuery] = useState('')
+  const [message, setMessage] = useState<string | null>(null)
+
+  const blank = (): Recipe => ({ id: '', name: '', description: '', body: '', enabled: true })
+
+  const shown = recipes.filter((r) =>
+    `${r.name} ${r.description}`.toLowerCase().includes(query.trim().toLowerCase())
+  )
+
+  const run = async (action: () => Promise<void>): Promise<void> => {
+    try {
+      await action()
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const save = (r: Recipe): Promise<void> =>
+    run(async () => {
+      onChanged(await window.api.saveRecipe({ ...r, id: r.id || undefined }))
+      setEditing(null)
+      setMessage(null)
+    })
+  const remove = (r: Recipe): Promise<void> =>
+    run(async () => {
+      if (!window.confirm(`Delete the recipe "${r.name}"?`)) return
+      onChanged(await window.api.deleteRecipe(r.id))
+    })
+  const toggle = (r: Recipe): Promise<void> =>
+    run(async () => onChanged(await window.api.setRecipeEnabled(r.id, !r.enabled)))
+  const exportOne = (r: Recipe): Promise<void> =>
+    run(async () => {
+      if (await window.api.exportRecipe(r.id)) setMessage(`Exported "${r.name}".`)
+    })
+  const importFiles = (): Promise<void> =>
+    run(async () => {
+      const result = await window.api.importRecipes()
+      if (!result) return
+      onChanged(result.recipes)
+      const parts = [`Imported ${result.imported} recipe${result.imported === 1 ? '' : 's'}.`]
+      if (result.errors.length > 0) parts.push(result.errors.join(' '))
+      setMessage(parts.join(' '))
+    })
+
+  return (
+    <div className="pantry-overlay history-overlay" onClick={onClose}>
+      <aside className="pantry history-panel" onClick={(e) => e.stopPropagation()}>
+        <header className="pantry-head">
+          <div>
+            <h2>
+              <BookOpenIcon /> Recipes
+            </h2>
+            <p className="pantry-sub">
+              Saved procedures the agent follows for repeatable tasks. Write one, paste one, or
+              import a SKILL.md file.
+            </p>
+          </div>
+          <button className="pantry-close" onClick={onClose} aria-label="Close" title="Close">
+            ✕
+          </button>
+        </header>
+
+        {editing ? (
+          <RecipeEditor
+            key={editing.id || 'new'}
+            initial={editing}
+            error={message}
+            onCancel={() => {
+              setEditing(null)
+              setMessage(null)
+            }}
+            onSave={save}
+          />
+        ) : (
+          <>
+            <div className="history-search recipe-toolbar">
+              <button
+                className="pantry-add"
+                onClick={() => {
+                  setMessage(null)
+                  setEditing(blank())
+                }}
+              >
+                ＋ New recipe
+              </button>
+              <button className="history-confirm-no" onClick={() => void importFiles()}>
+                Import…
+              </button>
+              <input
+                type="text"
+                placeholder="Search recipes…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+            {message && <div className="recipe-message">{message}</div>}
+            <div className="history-list">
+              {recipes.length === 0 && (
+                <div className="empty">
+                  No recipes yet. A recipe is a short markdown guide, like &quot;how to triage a
+                  bug report&quot;, that the agent loads when a task matches its description.
+                </div>
+              )}
+              {recipes.length > 0 && shown.length === 0 && (
+                <div className="empty">No recipes match your search.</div>
+              )}
+              {shown.map((r) => (
+                <div key={r.id} className={`history-item ${r.enabled ? '' : 'disabled'}`}>
+                  <button
+                    className="history-open"
+                    onClick={() => {
+                      setMessage(null)
+                      setEditing(r)
+                    }}
+                    title="Edit this recipe"
+                  >
+                    <span className="history-title">
+                      {r.enabled ? '📖' : '⏸'} {r.name}
+                    </span>
+                    <span className="history-meta">
+                      {r.description || 'No description, so the agent can’t tell when to use it'}
+                      {' · ~'}
+                      {estimateRecipeTokens(r.body)} tokens
+                    </span>
+                  </button>
+                  <button
+                    className="history-del"
+                    onClick={() => void exportOne(r)}
+                    aria-label="Export recipe"
+                    title="Export as a SKILL.md file"
+                  >
+                    <ArrowDownTrayIcon />
+                  </button>
+                  <button
+                    className="history-del"
+                    onClick={() => void toggle(r)}
+                    aria-label={r.enabled ? 'Disable' : 'Enable'}
+                    title={r.enabled ? 'Disable' : 'Enable'}
+                  >
+                    {r.enabled ? '⏸' : '⏵'}
+                  </button>
+                  <button
+                    className="history-del"
+                    onClick={() => void remove(r)}
+                    aria-label="Delete recipe"
+                    title="Delete recipe"
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </aside>
+    </div>
+  )
+}
+
+// The create/edit form for one recipe. A SKILL.md can also be pasted in whole
+// and split into its fields, for recipes written elsewhere.
+function RecipeEditor({
+  initial,
+  error,
+  onCancel,
+  onSave
+}: {
+  initial: Recipe
+  error: string | null
+  onCancel: () => void
+  onSave: (r: Recipe) => void
+}): JSX.Element {
+  const [draft, setDraft] = useState<Recipe>(initial)
+  const [pasted, setPasted] = useState('')
+  const set = (patch: Partial<Recipe>): void => setDraft((d) => ({ ...d, ...patch }))
+
+  const tooLong = draft.body.length > MAX_RECIPE_CHARS
+  const heavy = draft.body.length > LARGE_RECIPE_CHARS
+  const canSave = draft.name.trim().length > 0 && draft.body.trim().length > 0 && !tooLong
+
+  function fillFromPaste(): void {
+    const parsed = parseRecipeMarkdown(pasted, draft.name)
+    setDraft((d) => ({ ...d, ...parsed }))
+    setPasted('')
+  }
+
+  return (
+    <div className="pitcher-editor">
+      <label className="pitcher-field">
+        <span>Name</span>
+        <input
+          type="text"
+          value={draft.name}
+          onChange={(e) => set({ name: e.target.value })}
+          placeholder="Triage a bug report"
+        />
+      </label>
+
+      <label className="pitcher-field">
+        <span>
+          Description{' '}
+          <em className="pitcher-hint">
+            (the agent reads only this to decide when to use the recipe, so say when it applies)
+          </em>
+        </span>
+        <input
+          type="text"
+          value={draft.description}
+          onChange={(e) => set({ description: e.target.value })}
+          placeholder="Use when the user shares a bug report and wants it triaged."
+        />
+      </label>
+
+      <label className="pitcher-field">
+        <span>Instructions (markdown)</span>
+        <textarea
+          rows={12}
+          value={draft.body}
+          onChange={(e) => set({ body: e.target.value })}
+          placeholder={'1. Read the report and note the steps to reproduce.\n2. …'}
+        />
+        <em className={`pitcher-hint${tooLong ? ' recipe-error' : ''}`}>
+          ~{estimateRecipeTokens(draft.body)} tokens
+          {tooLong
+            ? ` , too long (limit ${MAX_RECIPE_CHARS} characters).`
+            : heavy
+              ? ' , heavy: it uses a lot of context each time it is loaded. Consider trimming it.'
+              : ''}
+        </em>
+      </label>
+
+      <details className="recipe-paste">
+        <summary>Paste a SKILL.md</summary>
+        <textarea
+          rows={6}
+          value={pasted}
+          onChange={(e) => setPasted(e.target.value)}
+          placeholder={'---\nname: My recipe\ndescription: When to use it\n---\n\nSteps…'}
+        />
+        <button className="history-confirm-no" disabled={!pasted.trim()} onClick={fillFromPaste}>
+          Fill the fields above
+        </button>
+      </details>
+
+      {error && <div className="recipe-message recipe-error">{error}</div>}
+
+      <div className="pitcher-actions">
+        <button className="history-confirm-no" onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          className="pantry-add"
+          disabled={!canSave}
+          onClick={() =>
+            onSave({
+              ...draft,
+              name: draft.name.trim(),
+              description: draft.description.trim(),
+              body: draft.body.trim()
+            })
+          }
+        >
+          Save recipe
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // The Pitchers slide-over: manage scheduled tasks ("Pitchers") that pour fresh
 // results on a timer or when the app opens. Each Pitcher is a saved prompt plus
 // a trigger, an output target, and a whitelist of tools it may auto-run.
 function Pitchers({
   pitchers,
   tools,
+  recipes,
   runningIds,
   onChanged,
   onOpenSession,
@@ -2674,6 +3210,7 @@ function Pitchers({
 }: {
   pitchers: Pitcher[]
   tools: AgentTool[]
+  recipes: Recipe[]
   runningIds: string[]
   onChanged: (list: Pitcher[]) => void
   onOpenSession: (id: string) => void
@@ -2737,6 +3274,7 @@ function Pitchers({
             key={editing.id}
             initial={editing}
             tools={tools}
+            recipes={recipes}
             onCancel={() => setEditing(null)}
             onSave={save}
           />
@@ -2873,11 +3411,13 @@ const intervalOptions = (current: number): number[] =>
 function PitcherEditor({
   initial,
   tools,
+  recipes,
   onCancel,
   onSave
 }: {
   initial: Pitcher
   tools: AgentTool[]
+  recipes: Recipe[]
   onCancel: () => void
   onSave: (p: Pitcher) => void
 }): JSX.Element {
@@ -2885,6 +3425,15 @@ function PitcherEditor({
   const [toolSearch, setToolSearch] = useState<string>('')
 
   const set = (patch: Partial<Pitcher>): void => setDraft((d) => ({ ...d, ...patch }))
+
+  const toggleRecipe = (id: string): void =>
+    setDraft((d) => {
+      const current = d.recipes ?? []
+      return {
+        ...d,
+        recipes: current.includes(id) ? current.filter((r) => r !== id) : [...current, id]
+      }
+    })
 
   const toggleTool = (qualified: string): void =>
     setDraft((d) => ({
@@ -3069,6 +3618,30 @@ function PitcherEditor({
           </em>
         )}
       </div>
+
+      {recipes.length > 0 && (
+        <div className="pitcher-field">
+          <span>
+            Recipes{' '}
+            <em className="pitcher-hint">(their instructions are included every time this task runs)</em>
+          </span>
+          <div className="pitcher-tools">
+            {recipes.map((r) => (
+              <label key={r.id} className="pitcher-tool" title={r.description}>
+                <input
+                  type="checkbox"
+                  checked={(draft.recipes ?? []).includes(r.id)}
+                  onChange={() => toggleRecipe(r.id)}
+                />
+                <span className="pitcher-tool-name">
+                  {r.name}
+                  {r.enabled ? '' : ' (disabled)'}
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="pitcher-actions">
         <button className="history-confirm-no" onClick={onCancel}>
@@ -3899,6 +4472,18 @@ function Line({
           </span>
         )}
         {entry.text}
+        {entry.kind === 'user' && entry.recipes && entry.recipes.length > 0 && (
+          <span className="bubble-attachments recipe-bubble-chips">
+            {entry.recipes.map((name, i) => (
+              <span key={i} className="attachment recipe-chip" title="Recipe attached to this message">
+                <span className="attachment-icon" aria-hidden="true">
+                  <BookOpenIcon />
+                </span>
+                <span className="attachment-name">{name}</span>
+              </span>
+            ))}
+          </span>
+        )}
       </span>
     </div>
   )

@@ -6,6 +6,7 @@
   --panel: #16262a;
   --border: #274044;
   --text: #e4f2f1;
+  --text-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'%3E%3Cpath d='M5 4h6M8 4v16M5 20h6' fill='none' stroke='%230f1a1c' stroke-width='3'/%3E%3Cpath d='M5 4h6M8 4v16M5 20h6' fill='none' stroke='%23e4f2f1' stroke-width='1.5'/%3E%3C/svg%3E");
   --muted: #86a5a3;
   --accent: #f5c542;
   --accent-deep: #c99a26;
@@ -36,6 +37,7 @@
   --panel: #fffdf0;
   --border: #eae2b3;
   --text: #2d2a18;
+  --text-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='24' viewBox='0 0 16 24'%3E%3Cpath d='M5 4h6M8 4v16M5 20h6' fill='none' stroke='%23fffdf0' stroke-width='3'/%3E%3Cpath d='M5 4h6M8 4v16M5 20h6' fill='none' stroke='%232d2a18' stroke-width='1.5'/%3E%3C/svg%3E");
   --muted: #8b8565;
   --accent: #22b07d;
   --accent-deep: #17916a;
@@ -77,6 +79,21 @@ body {
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
+}
+
+/* Windows' native I-beam can turn white on light surfaces in Chromium. */
+:where(
+  textarea,
+  input:not([type]),
+  input[type='text'],
+  input[type='search'],
+  input[type='password'],
+  input[type='email'],
+  input[type='url'],
+  input[type='tel'],
+  input[type='number']
+) {
+  cursor: var(--text-cursor) 8 12, text;
 }
 
 /* Custom scrollbar , replaces the default Windows chrome. */
@@ -2030,6 +2047,48 @@ body {
   gap: 6px;
 }
 
+/* Messages sent while the agent is working, waiting to be picked up. */
+.queued-influences {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.queued-influence {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.queued-influence-tag {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.queued-influence-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Smaller companions to the stop button while the agent works. */
+.composer button.send-btn.influence-btn {
+  width: 36px;
+  height: 36px;
+  font-size: 16px;
+}
+
+.composer button.send-btn.influence-btn .send-lemon {
+  font-size: 16px;
+}
+
 .attachment {
   display: inline-flex;
   align-items: center;
@@ -3301,6 +3360,87 @@ button.server-status:hover {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* --- Recipes -------------------------------------------------------------- */
+
+.recipe-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.recipe-toolbar input {
+  flex: 1;
+  min-width: 0;
+}
+
+.recipe-message {
+  margin: 0 14px 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.recipe-error {
+  color: #e05a5a;
+}
+
+.recipe-paste {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.recipe-paste textarea {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 8px 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
+/* Recipe picker shown above the composer input. */
+.recipe-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--bg);
+}
+
+.recipe-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.recipe-chip .attachment-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+.composer button.recipe-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* --- The Napkin (rich artifact side panel) -------------------------------- */

@@ -307,7 +307,7 @@ export type ApprovalDecision = 'approve' | 'deny' | 'always'
  * restored exactly as it looked, not just as the model saw it. Kept here so both
  * processes can persist/round-trip it. */
 export type TranscriptEntry =
-  | { kind: 'user'; text: string; attachments?: MessageAttachment[] }
+  | { kind: 'user'; text: string; attachments?: MessageAttachment[]; recipes?: string[] }
   | { kind: 'assistant'; text: string }
   // The model's chain-of-thought, shown as a live-streaming block that collapses
   // to a one-line summary once the turn moves on. Kept in the visual transcript
@@ -346,6 +346,21 @@ export interface StoredSession extends SessionSummary {
   summary?: string
 }
 
+/** A saved, reusable procedure ("recipe", SKILL.md-style) the agent can follow
+ * to resolve a repeatable task faster. Stored as `recipes/<id>/SKILL.md`. */
+export interface Recipe {
+  /** Stable kebab-case id, also the folder name. */
+  id: string
+  name: string
+  /** One-line summary of what it does and when to use it. This is all the model
+   * sees until it decides to load the recipe, so it should say when it applies. */
+  description: string
+  /** The markdown instructions. */
+  body: string
+  /** Disabled recipes are kept but hidden from the model. */
+  enabled: boolean
+}
+
 /** How a Pitcher fires. `on-open` runs once per app launch; `daily`, `weekly`
  * and `monthly` run at a local "HH:MM" (and catch up on launch if the most recent
  * fire was missed while the app was closed); `interval` repeats every N minutes
@@ -375,6 +390,9 @@ export interface Pitcher {
    * pour. Anything not listed is denied, so a scheduled task never gets a blank
    * cheque to run tools it wasn't explicitly granted. */
   allowedTools: string[]
+  /** Ids of recipes whose instructions are included in every pour, so a
+   * scheduled run follows the same procedure each time. */
+  recipes?: string[]
   /** Epoch ms of the last successful pour, for catch-up on launch. */
   lastRunAt?: number
   /** Epoch ms of the last user-initiated Stop. Like `lastRunAt`, it marks a
@@ -437,6 +455,8 @@ export type AgentEvent =
   | { type: 'reasoning'; text: string }
   | { type: 'tool_call'; server: string; tool: string; args: unknown }
   | { type: 'tool_result'; server: string; tool: string; ok: boolean; preview: string }
+  // The model loaded a recipe via the built-in `use_recipe` tool.
+  | { type: 'recipe_used'; id: string; name: string }
   // The model created or revised its working plan via the built-in `update_plan`
   // tool. `steps` is the full, current checklist the renderer should display.
   | { type: 'plan_updated'; steps: PlanStep[] }
@@ -477,6 +497,12 @@ export type AgentEvent =
   // window. `messages` is the new, compacted model-facing history the renderer
   // should adopt in place of what it sent.
   | { type: 'history_compacted'; messages: ChatMessage[] }
+  // A queued influence (see RendererApi.influenceMessage) was injected into the turn.
+  // The renderer moves it from its queue into the transcript at this point.
+  | { type: 'influence_applied'; id: string }
+  // The in-flight model completion was aborted by an interrupt. Its partial
+  // reply is discarded; the renderer should settle any live reasoning preview.
+  | { type: 'completion_interrupted' }
   | { type: 'error'; message: string }
   | { type: 'done' }
 
@@ -573,6 +599,11 @@ export interface RendererApi {
   sendMessage(messages: ChatMessage[]): Promise<void>
   /** Halt the in-flight agent turn started by `sendMessage`. */
   cancelMessage(): void
+  /** Send an influence into the running turn to change its direction. It is applied
+   * at the agent's next step; with `interrupt` the in-flight model completion is
+   * also aborted so it applies immediately. Resolves false when no turn is
+   * running (the message was not accepted). */
+  influenceMessage(id: string, content: ChatMessage['content'], interrupt: boolean): Promise<boolean>
   /** Resolve the absolute filesystem path of a dropped/pasted `File`, so items
    * dragged from the OS can be handed to the agent's filesystem tools. Returns
    * an empty string when the file has no on-disk path (e.g. pasted image data). */
@@ -589,8 +620,9 @@ export interface RendererApi {
   /** Answer a pending `tool_approval_request`. */
   respondApproval(id: string, decision: ApprovalDecision): void
   /** Turn "Allow all" on or off. While on, every tool call (including each
-   * sub-tool of a multi-tool server) is approved without prompting. The renderer
-   * owns the persisted choice and re-sends it on startup; false restores the
+   * sub-tool of a multi-tool server) is approved, and the agent keeps going
+   * past its step limit, without prompting. The renderer owns the persisted
+   * choice and re-sends it on startup; false restores the
    * default (env/settings.json) approval behavior. */
   setBypassApprovals(enabled: boolean): void
   /** Answer a pending `step_limit_request`: true to let the agent keep going
@@ -699,6 +731,20 @@ export interface RendererApi {
   cancelPitcher(id: string): Promise<void>
   /** Subscribe to Pitcher run-state events. Returns an unsubscribe function. */
   onPitcherEvent(handler: (event: PitcherEvent) => void): () => void
+  /** List saved recipes (with bodies), enabled or not. */
+  listRecipes(): Promise<Recipe[]>
+  /** Create or update a recipe. A recipe without an `id` gets a fresh one.
+   * Returns the refreshed list, or throws when the content is invalid. */
+  saveRecipe(recipe: Omit<Recipe, 'id'> & { id?: string }): Promise<Recipe[]>
+  /** Delete a recipe. Returns the refreshed list. */
+  deleteRecipe(id: string): Promise<Recipe[]>
+  /** Enable or disable a recipe without deleting it. Returns the refreshed list. */
+  setRecipeEnabled(id: string, enabled: boolean): Promise<Recipe[]>
+  /** Pick one or more markdown files and import them as recipes. Returns the
+   * refreshed list plus per-file problems; null when the picker was cancelled. */
+  importRecipes(): Promise<{ recipes: Recipe[]; imported: number; errors: string[] } | null>
+  /** Save a recipe as a SKILL.md file via a native save dialog. */
+  exportRecipe(id: string): Promise<boolean>
   /** Minimize the window. */
   minimizeWindow(): void
   /** Toggle between maximized and restored. */

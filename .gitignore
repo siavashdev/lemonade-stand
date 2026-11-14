@@ -27,12 +27,16 @@ config/pitchers.local.json
 # Conversation history written at runtime (dev: project root, packaged: %APPDATA%).
 conversations/
 
+# Saved recipes (SKILL.md files) written at runtime, same locations as above.
+/recipes/
+
 # Knowledge-graph file written at runtime by the Memory MCP server (dev: project
 # root, packaged: %APPDATA%). Set MEMORY_FILE_PATH to relocate it.
 memory.jsonl
 
 # local tests
 temp/
+.playwright-mcp/
 
 # Ad-hoc local "test" files and folders stay ignored, but the project's own suite
 # in /test (run by vitest and by CI) must not be, or new tests are silently left

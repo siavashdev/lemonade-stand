@@ -197,6 +197,9 @@ export interface AppSettings {
    * the UI. Bounds runaway reasoning/output; 0 disables the cap. Restored on
    * the next launch so the choice survives restarts. */
   maxCompletionTokens?: number
+  /** Ids of recipes the user switched off. Kept here (not in the recipe's own
+   * SKILL.md) so recipe files stay portable. */
+  disabledRecipes?: string[]
 }
 
 /** Read one settings file's JSON object; null when the file is absent/malformed. */

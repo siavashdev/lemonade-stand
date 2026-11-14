@@ -30,6 +30,10 @@ const api: RendererApi = {
     ipcRenderer.send('agent:cancel')
   },
 
+  influenceMessage(id, content, interrupt): Promise<boolean> {
+    return ipcRenderer.invoke('agent:influence', id, content, interrupt)
+  },
+
   getPathForFile(file: File): string {
     try {
       return webUtils.getPathForFile(file)
@@ -233,6 +237,30 @@ const api: RendererApi = {
     const listener = (_event: unknown, payload: PitcherEvent): void => handler(payload)
     ipcRenderer.on('pitcher:event', listener)
     return () => ipcRenderer.removeListener('pitcher:event', listener)
+  },
+
+  listRecipes() {
+    return ipcRenderer.invoke('recipe:list')
+  },
+
+  saveRecipe(recipe) {
+    return ipcRenderer.invoke('recipe:save', recipe)
+  },
+
+  deleteRecipe(id: string) {
+    return ipcRenderer.invoke('recipe:delete', id)
+  },
+
+  setRecipeEnabled(id: string, enabled: boolean) {
+    return ipcRenderer.invoke('recipe:set-enabled', id, enabled)
+  },
+
+  importRecipes() {
+    return ipcRenderer.invoke('recipe:import')
+  },
+
+  exportRecipe(id: string) {
+    return ipcRenderer.invoke('recipe:export', id)
   },
 
   minimizeWindow(): void {

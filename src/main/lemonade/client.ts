@@ -1251,6 +1251,14 @@ export class LemonadeClient {
         ;(choice.message as { reasoning_content?: string }).reasoning_content = reasoning
       }
       return choice
+    } catch (err) {
+      const overflow = parseContextOverflow(err instanceof Error ? err.message : String(err))
+      if (overflow) {
+        // Believe the server's real window so later budget checks compact in time.
+        this.cachedServerContext = overflow.available
+        this.contextOverride = undefined
+      }
+      throw err
     } finally {
       tracked.end(completed)
       signal?.removeEventListener('abort', onAbort)

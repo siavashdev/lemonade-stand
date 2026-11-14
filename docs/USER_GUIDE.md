@@ -7,8 +7,18 @@ it decides when to reach for a tool. Before any tool runs, you'll see an
 **approval card** (Allow once / Always allow / Deny) unless you've turned
 approvals off. To skip the cards entirely, open the **Permissions** menu in the
 footer and choose **Allow all** (⚠): every tool and sub-tool then runs without
-asking. **Manual permissions** is the default; the choice is remembered between
-conversations and restarts.
+asking, and the agent keeps going past its step limit instead of asking whether
+to continue (the Stop button still halts it). **Manual permissions** is the
+default; the choice is remembered between conversations and restarts.
+
+While the agent is working the chat box stays open, so you can change its
+direction mid-task. Type a message and press **Enter** to **influence** it: the agent
+picks it up after its current step and adjusts its plan. Press **Ctrl+Enter**
+(⌘+Enter on macOS) or click ⚡ to **interrupt now**: the reply being written is
+cut short and thrown away, and the agent carries on with your message right
+away. Your message shows as *Queued* above the box until the agent takes it in.
+If the turn finishes or you press Stop before that happens, the text goes back
+into the chat box.
 
 This guide lists every tool that ships in the Pantry, how to enable it, and
 copy‑paste example prompts you can use to test each one.
@@ -232,6 +242,53 @@ install, and the agent will relay it.
 
 ---
 
+## Recipes
+
+A **recipe** is a saved, step-by-step procedure the agent follows to finish a
+repeatable task faster, such as "triage a bug report" or "write the weekly
+status update". It is a markdown document in the same format as a Claude
+`SKILL.md`: a `name` and a `description` in a `---` header, then your
+instructions.
+
+```markdown
+---
+name: Triage a bug report
+description: Use when the user shares a bug report and wants it triaged.
+---
+
+1. Restate the problem in one sentence.
+2. List the steps to reproduce; ask for any that are missing.
+3. Suggest a severity (low, medium, high) with one line of reasoning.
+```
+
+Open **Recipes** in the top bar to manage them:
+
+- **New recipe** to write one by hand. The editor also has **Paste a SKILL.md**,
+  which splits pasted text into the name, description and instructions.
+- **Import…** to load one or more `.md` files. A file without a header still
+  works: its first heading becomes the name and its first paragraph the description.
+- **Export** (download icon) saves a recipe as a `SKILL.md`-style file, **⏸/⏵**
+  turns it off or on without deleting it, and the trash icon deletes it.
+
+How the agent uses them:
+
+- **On its own.** The agent sees only each enabled recipe's name and
+  **description**, a line each, so write the description to say *when* it applies.
+  When your request matches, it loads the full recipe and follows it (you'll see a
+  `recipe → name` line in the chat). The full text only costs context when used.
+- **When you choose.** Click the book button next to the message box to attach
+  recipes to your next message. Their instructions are sent with it, which also
+  works with small models that don't pick recipes up by themselves.
+- **In scheduled tasks.** A Pitcher can include recipes, and each run follows them.
+
+Tips: keep recipes short and specific (the editor shows an approximate token
+count and warns when one is heavy, and rejects anything over 32,000
+characters); a recipe guides the agent but doesn't grant it anything, so tool
+approvals still apply. Recipes are stored on your computer in the `recipes`
+folder next to your settings, one folder per recipe.
+
+---
+
 ## Pitchers
 (scheduled tasks) run prompts fresh on a timer or when the app opens
   - **On-open trigger**: runs once each app launch
@@ -245,6 +302,7 @@ install, and the agent will relay it.
   - **Desktop notifications** when results are ready and the window isn't focused
   - **Managed from a new Pitchers panel**: create, edit, enable/disable, manually "Pour now", and see last-run status + errors
   - **Create from chat**: just ask the agent to schedule, automate, or repeat a task (e.g. "every morning at 8, fetch example.com and summarize the headlines"). It drafts a Pitcher, pre-selects the tools it needs, and opens a pre-filled editor for you to review the trigger and tools and save. Nothing is scheduled until you confirm, and you can add or remove any pre-selected tool first
+  - **Recipes**: tick any saved [recipe](#recipes) in the Pitcher editor and its instructions are included in every run
   - **Graceful serialization**: pours never collide with interactive chat turns; they queue and run when the user isn't typing
 
 ## Quick test checklist

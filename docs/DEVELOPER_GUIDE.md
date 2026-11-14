@@ -50,6 +50,71 @@ When it is on, the **Lemonade Stand logs** viewer shows the file's path with a
 **Show file** button, and the file starts with everything logged before it was
 opened.
 
+# Recipes
+
+Recipes (SKILL.md-style skills) are saved procedures the agent loads on demand.
+They are deliberately *progressive*: local models have small context windows, so
+only each recipe's one-line description is put in the system prompt and the full
+body is loaded when needed.
+
+- **Storage.** [`src/main/recipes/store.ts`](../src/main/recipes/store.ts) keeps one
+  folder per recipe, `recipes/<id>/SKILL.md`, in the writable config dir (dev:
+  the project root, gitignored; packaged: `%APPDATA%`). The file is plain
+  `name`/`description` frontmatter plus the body, so it stays portable. Whether a
+  recipe is on is app state kept in `disabledRecipes` in `settings.json`, not in
+  the file. Ids come from the name (`uniqueRecipeId`) and are sanitized so they
+  can't escape the folder; bodies over `MAX_RECIPE_CHARS` are rejected.
+- **Parsing.** [`src/shared/recipes.ts`](../src/shared/recipes.ts) holds the pure
+  helpers shared with the renderer: `parseRecipeMarkdown` (tolerates a missing
+  header by deriving the name from the first heading and the description from the
+  first paragraph), `serializeRecipeMarkdown`, `buildRecipeCatalog` and
+  `buildRecipeAppendix`.
+- **Agent loop.** `Agent` takes a `getRecipes()` provider, read fresh each turn so
+  edits apply without a restart. `fullSystemPrompt()` appends the catalogue (empty
+  when nothing is enabled, so users without recipes pay nothing) and `run()` adds
+  the built-in `use_recipe` tool only when a recipe is enabled. `use_recipe` is
+  in-process and needs no approval; it returns the body (or the list of valid ids
+  for an unknown or disabled one) and emits `recipe_used` for the transcript. It is
+  in `BUILTIN_TOOLS`, so it doesn't count as real work for the forced-planning logic.
+- **Manual attach and Pitchers.** The renderer appends the chosen recipes' bodies to
+  the user message (`buildRecipeAppendix`), so the instruction persists in that
+  conversation's history. `pourPitcher` does the same for a Pitcher's `recipes`
+  ids, because a headless run shouldn't depend on the model choosing to load one.
+- **IPC.** `recipe:list|save|delete|set-enabled|import|export` in
+  [`src/main/index.ts`](../src/main/index.ts), exposed through the preload bridge.
+  Imports are capped at 256 KB per file and never overwrite an existing recipe.
+- Tests: [`test/recipes.test.ts`](../test/recipes.test.ts).
+
+# Influencing a running turn
+
+The composer stays enabled while a turn runs. Messages sent then go through the
+`agent:influence` IPC (`influenceMessage` in the preload bridge) into an
+[`InfluenceChannel`](../src/main/agent/influence.ts), one per interactive turn (created in
+the `agent:send` handler in [`src/main/index.ts`](../src/main/index.ts); Pitcher
+pours get none, so scheduled runs can't be influenced).
+
+- **Influence (Enter).** `Agent.run` drains the channel at the top of each loop
+  iteration, when every earlier tool call already has its result, and appends
+  each message as a user message wrapped by `wrapInfluence` (it tells the model to
+  adjust its plan). A final answer written while an influence is pending is still
+  shown, but the turn continues instead of ending, and the unfinished-plan nudge
+  is skipped. `influence_applied { id }` tells the renderer to move the message from
+  its queue into the transcript.
+- **Interrupt now (Ctrl+Enter).** `chatWithOverflowRetry` gives every completion
+  its own `AbortController` (bound to the channel, combined with the run's
+  signal). An interrupt aborts only that controller; `Agent.run` sees the abort
+  with the run signal still live, drops the partial reply (nothing is pushed, so
+  no orphaned `tool_calls`), emits `completion_interrupted` and loops, injecting
+  the influence. When no completion is in flight (a tool is running, or a prompt is
+  open) it degrades to a normal influence. A real Stop aborts the run signal and ends
+  the turn as before.
+- **Hand-back.** `agent:influence` returns false once the turn is over or stopped. The
+  renderer also restores any influence still queued when `done` arrives (including
+  after Stop) to the composer, so typed text is never lost.
+- A `history_compacted` event already contains the influences applied so far, so the
+  renderer clears its per-turn `collected` list when it adopts it.
+- Tests: [`test/agent-influence.test.ts`](../test/agent-influence.test.ts).
+
 # Monitor
 
 A **Monitoring pill** in the status bar ([`src/renderer/MonitorPill.tsx`](../src/renderer/MonitorPill.tsx):

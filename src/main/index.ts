@@ -10,8 +10,16 @@ import {
 } from 'electron'
 import type { WebContents } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join } from 'node:path'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type {
   AgentEvent,
@@ -24,6 +32,7 @@ import type {
   Pitcher,
   PitcherEvent,
   PitcherRunResult,
+  Recipe,
   StoredSession,
   TranscriptEntry
 } from '@shared/types'
@@ -49,7 +58,17 @@ import { MonitorHub } from './lemonade/monitor'
 import { parseBackendTiming } from './lemonade/inference'
 import { McpManager } from './mcp/manager'
 import { Agent, type ApproveFn, type AskNapkinFn, type ContinueFn, type ProposePitcherFn } from './agent/loop'
+import { InfluenceChannel } from './agent/influence'
 import { PitcherScheduler } from './pitcher/scheduler'
+import {
+  deleteRecipe,
+  getRecipes,
+  importRecipeFiles,
+  listRecipes,
+  saveRecipe,
+  setRecipeEnabled
+} from './recipes/store'
+import { buildRecipeAppendix, serializeRecipeMarkdown } from '@shared/recipes'
 import {
   getAppLogs,
   getLogFilePath,
@@ -139,7 +158,14 @@ const lemonade = new LemonadeClient(
   config.maxCompletionTokens
 )
 const mcp = new McpManager()
-const agent = new Agent(lemonade, mcp, config.maxSteps, config.systemPrompt, config.compactThreshold)
+const agent = new Agent(
+  lemonade,
+  mcp,
+  config.maxSteps,
+  config.systemPrompt,
+  config.compactThreshold,
+  () => listRecipes(appPath)
+)
 
 // --- Session state -----------------------------------------------------------
 
@@ -159,8 +185,9 @@ debugLog(
 // name). Cleared on restart so a persistent grant never outlives the process.
 const sessionAllow = new Set<string>()
 
-// "Allow all" permission mode. When on, tool calls are approved without
-// prompting regardless of config.requireApproval. The renderer owns the
+// "Allow all" permission mode. When on, tool calls are approved and the
+// "keep going past the step limit?" prompt is answered yes, without prompting,
+// regardless of config.requireApproval. The renderer owns the
 // persisted choice (footer Permissions menu) and pushes it here on startup and
 // whenever it changes.
 let bypassApprovals = false
@@ -193,6 +220,8 @@ const pendingPitcherProposals = new Map<
 // channels so a long chat turn or transcription can be interrupted.
 let currentAgentAbort: AbortController | null = null
 let currentTranscribeAbort: AbortController | null = null
+// Mid-turn messages for the interactive turn in flight (null between turns).
+let currentInfluence: InfluenceChannel | null = null
 
 // The main window, captured in createWindow(). Headless Pitcher pours use it to
 // mirror events to an open UI and to raise desktop notifications.
@@ -236,8 +265,12 @@ function applyWindowIcon(win: BrowserWindow): void {
 
 function createWindow(): void {
   const window = new BrowserWindow({
-    width: 1000,
-    height: 720,
+    width: 1280,
+    height: 760,
+    // The status bar is a single row of controls; below this width it would
+    // overflow, so the window can't be shrunk past it.
+    minWidth: 1200,
+    minHeight: 560,
     title: 'Lemonade Stand',
     // Frameless: no native OS title bar. The renderer draws its own top bar and
     // window controls (see App.tsx / styles.css).
@@ -489,6 +522,70 @@ ipcMain.handle('dialog:pick-path', async (_event, kind: 'folder' | 'file') => {
     properties: [kind === 'folder' ? 'openDirectory' : 'openFile']
   })
   return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+})
+
+// --- Recipes (skills) ----------------------------------------------------------
+// Saved SKILL.md-style procedures the agent can load on demand. Stored one folder
+// per recipe under the writable config dir (see recipes/store.ts).
+
+ipcMain.handle('recipe:list', () => listRecipes(appPath))
+ipcMain.handle('recipe:save', (_event, recipe: Omit<Recipe, 'id'> & { id?: string }) => {
+  saveRecipe(appPath, recipe)
+  return listRecipes(appPath)
+})
+ipcMain.handle('recipe:delete', (_event, id: string) => {
+  deleteRecipe(appPath, id)
+  return listRecipes(appPath)
+})
+ipcMain.handle('recipe:set-enabled', (_event, id: string, enabled: boolean) => {
+  setRecipeEnabled(appPath, id, enabled)
+  return listRecipes(appPath)
+})
+
+// Largest file we'll read when importing, so a mistaken pick (a huge binary or
+// log) can't be pulled into memory. Recipe bodies are capped far lower anyway.
+const MAX_IMPORT_BYTES = 256 * 1024
+
+ipcMain.handle('recipe:import', async () => {
+  const result = await dialog.showOpenDialog({
+    title: 'Import recipes',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'txt'] }]
+  })
+  if (result.canceled || result.filePaths.length === 0) return null
+  const files: { name: string; content: string }[] = []
+  const errors: string[] = []
+  for (const path of result.filePaths) {
+    const name = basename(path)
+    try {
+      if (statSync(path).size > MAX_IMPORT_BYTES) {
+        errors.push(`${name}: file is too large to be a recipe.`)
+        continue
+      }
+      files.push({ name, content: readFileSync(path, 'utf8') })
+    } catch (err) {
+      errors.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  const outcome = importRecipeFiles(appPath, files)
+  return {
+    recipes: listRecipes(appPath),
+    imported: outcome.imported,
+    errors: [...errors, ...outcome.errors]
+  }
+})
+
+ipcMain.handle('recipe:export', async (_event, id: string) => {
+  const recipe = listRecipes(appPath).find((r) => r.id === id)
+  if (!recipe) return false
+  const result = await dialog.showSaveDialog({
+    title: 'Export recipe',
+    defaultPath: `${recipe.id}.md`,
+    filters: [{ name: 'Markdown', extensions: ['md'] }]
+  })
+  if (result.canceled || !result.filePath) return false
+  writeFileSync(result.filePath, serializeRecipeMarkdown(recipe), 'utf8')
+  return true
 })
 
 // --- Conversation history ----------------------------------------------------
@@ -758,7 +855,7 @@ ipcMain.handle('agent:context-breakdown', (_event, messages: ChatMessage[]) =>
   lemonade.contextBreakdown(
     messages as never,
     mcp.getOpenAiTools(),
-    config.systemPrompt
+    agent.fullSystemPrompt()
   )
 )
 
@@ -936,6 +1033,8 @@ function describeEvent(e: AgentEvent): string {
       return `tool_call ${e.server}__${e.tool} args=${JSON.stringify(e.args).slice(0, 200)}`
     case 'tool_result':
       return `tool_result ${e.server}__${e.tool} ok=${e.ok} preview=${e.preview.slice(0, 120)}`
+    case 'recipe_used':
+      return `recipe_used id=${e.id}`
     case 'plan_updated':
       return `plan_updated steps=${e.steps.length} [${e.steps
         .map((s) => `${s.status[0]}:${s.title}`)
@@ -963,6 +1062,8 @@ function describeEvent(e: AgentEvent): string {
       return `context_warning est=${e.estimatedTokens} ctx=${e.contextSize} overflow=${e.overflow}`
     case 'history_compacted':
       return `history_compacted messages=${e.messages.length}`
+    case 'influence_applied':
+      return `influence_applied id=${e.id}`
     case 'error':
       return `error ${e.message}`
     case 'done':
@@ -1030,8 +1131,10 @@ ipcMain.handle('agent:send', async (event, messages: ChatMessage[]) => {
   }
 
   // Step-limit callback: prompt the renderer when the agent runs out of its
-  // step budget and await the user's choice to keep going or stop.
+  // step budget and await the user's choice to keep going or stop. Allow all
+  // keeps going without asking (the Stop button still halts the run).
   const onLimit: ContinueFn = (steps) => {
+    if (bypassApprovals) return Promise.resolve(true)
     const id = randomUUID()
     send({ type: 'step_limit_request', id, steps })
     return new Promise<boolean>((resolve) => {
@@ -1062,12 +1165,37 @@ ipcMain.handle('agent:send', async (event, messages: ChatMessage[]) => {
 
   const abort = new AbortController()
   currentAgentAbort = abort
+  const influence = new InfluenceChannel()
+  currentInfluence = influence
   try {
-    await agent.run(messages, emit, approve, abort.signal, onLimit, askNapkin, proposePitcher)
+    await agent.run(
+      messages,
+      emit,
+      approve,
+      abort.signal,
+      onLimit,
+      askNapkin,
+      proposePitcher,
+      influence
+    )
   } finally {
     if (currentAgentAbort === abort) currentAgentAbort = null
+    if (currentInfluence === influence) currentInfluence = null
   }
 })
+
+// Renderer's influence input: a message typed while the turn is running. Queued for
+// the agent's next step, or, with `interrupt`, also cuts short the model call in
+// flight. False when no turn is running so the renderer can keep the text.
+ipcMain.handle(
+  'agent:influence',
+  (_event, id: string, content: ChatMessage['content'], interrupt: boolean) => {
+    if (!currentInfluence || currentAgentAbort?.signal.aborted) return false
+    const interrupted = currentInfluence.push({ id, content }, interrupt === true)
+    debugLog(`[agent] influence queued interrupt=${interrupt === true} interrupted=${interrupted}`)
+    return true
+  }
+)
 
 // Renderer's stop button: halt the running agent turn. Aborting only flips the
 // signal, which the loop checks between steps , but if the turn is parked on a
@@ -1123,10 +1251,11 @@ async function pourPitcher(p: Pitcher): Promise<PitcherRunResult> {
   // A napkin pour steers the model to present its answer as a rich artifact via
   // show_napkin; we still synthesize one below as a fallback if it ignores the
   // hint, so "serves napkin" always yields a Napkin.
+  const recipeAppendix = buildRecipeAppendix(getRecipes(appPath, p.recipes ?? []))
   const prompt =
-    p.output === 'napkin'
+    (p.output === 'napkin'
       ? `${p.prompt}\n\nPresent your final answer by calling the show_napkin tool (use kind:"markdown" unless another kind fits the content better) rather than only replying in chat.`
-      : p.prompt
+      : p.prompt) + recipeAppendix
   const messages: ChatMessage[] = [{ role: 'user', content: prompt }]
   let napkin: Napkin | null = null
   let finalText = ''
@@ -1150,6 +1279,8 @@ async function pourPitcher(p: Pitcher): Promise<PitcherRunResult> {
       entries.push({ kind: 'tool', label: `${e.server} → ${e.tool}`, detail: JSON.stringify(e.args) })
     } else if (e.type === 'tool_result') {
       entries.push({ kind: 'tool', label: `${e.server} ← ${e.tool}`, detail: e.preview, ok: e.ok })
+    } else if (e.type === 'recipe_used') {
+      entries.push({ kind: 'tool', label: `recipe → ${e.name}`, detail: 'Loaded recipe instructions', ok: true })
     } else if (e.type === 'error') {
       emittedError = e.message
       entries.push({ kind: 'error', text: e.message })
