@@ -342,6 +342,12 @@ folder next to your settings, one folder per recipe.
   4,096-token context."** The server loaded the model with a small context
   window. Raise it from the context button in the status bar, or start a new
   session.
+- **Stuck server after a reload.** The server is still generating but the chat
+  was cleared, so there is no Stop button. Click **Server online** in the status
+  bar: it shows whether the server is generating, and **Stop inference** aborts
+  every request the app has open. If the server still reports busy, another
+  client is driving it; unload the model from **Models** (the **Unload** button
+  works on the active model too, and it reloads on the next request).
 - **Confirm what's loaded.** Ask the agent *"What tools do you have?"* at any
   time.
 

@@ -33,6 +33,22 @@ export function serverLogsUrl(baseUrl: string, apiKey: string): string | undefin
   return target.toString()
 }
 
+// Node's WebSocket client dials only one address for a hostname, and on machines
+// where "localhost" resolves to several (127.0.0.1, ::1, a WSL/Docker relay on
+// only one of them) the pick can be the dead one, failing every retry while the
+// REST calls (which fall back across addresses) work. So after a failed attempt
+// on a "localhost" URL, the next attempts dial each loopback address in turn.
+const LOOPBACK_HOSTS = ['localhost', '127.0.0.1', '[::1]']
+
+/** `url` with its host swapped for the `index`-th loopback variant (cycling) when
+ * it points at "localhost"; any other host is returned unchanged. */
+export function withHostVariant(url: string, index: number): string {
+  const parsed = new URL(url)
+  if (parsed.hostname !== 'localhost') return url
+  parsed.hostname = LOOPBACK_HOSTS[index % LOOPBACK_HOSTS.length]
+  return parsed.toString()
+}
+
 /** Map the server's severity word (Trace, Debug, Info, Warning, Error, Fatal, or
  * the short `Warn` its log lines use) onto the shared lower-case scale. */
 function normalizeSeverity(value: unknown): LogSeverity {
@@ -137,6 +153,8 @@ export class ServerLogStream {
   // Bumped whenever a socket is replaced or torn down, so late events from an
   // abandoned socket are recognised and ignored.
   private generation = 0
+  // Which address variant of a "localhost" server to dial (see withHostVariant).
+  private hostIndex = 0
 
   constructor(
     private readonly connection: () => { baseUrl: string; apiKey: string },
@@ -154,6 +172,7 @@ export class ServerLogStream {
     this.running = true
     this.teardown()
     this.attempt = 0
+    this.hostIndex = 0
     this.connect()
   }
 
@@ -194,7 +213,7 @@ export class ServerLogStream {
     const stale = (): boolean => generation !== this.generation
     let socket: LogSocket
     try {
-      socket = this.socketFactory(url)
+      socket = this.socketFactory(withHostVariant(url, this.hostIndex))
     } catch (err) {
       this.emit({
         type: 'status',
@@ -206,8 +225,10 @@ export class ServerLogStream {
     }
     this.socket = socket
     let detail = ''
+    let opened = false
     socket.addEventListener('open', () => {
       if (stale()) return
+      opened = true
       socket.send(JSON.stringify({ type: 'logs.subscribe', after_seq: null }))
       this.emit({ type: 'status', state: 'live' })
     })
@@ -227,6 +248,8 @@ export class ServerLogStream {
     socket.addEventListener('close', () => {
       if (stale()) return
       this.socket = null
+      // Never got through: try the next address for "localhost" next time.
+      if (!opened) this.hostIndex++
       this.emit({
         type: 'status',
         state: 'closed',

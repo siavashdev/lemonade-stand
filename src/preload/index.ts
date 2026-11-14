@@ -3,11 +3,13 @@ import type {
   AgentEvent,
   ApprovalDecision,
   ChatMessage,
+  ForceStopResult,
   LogEntry,
   MonitorSample,
   OptionValues,
   PitcherEvent,
   RendererApi,
+  ServerActivity,
   ServerLogEvent
 } from '@shared/types'
 
@@ -104,6 +106,14 @@ const api: RendererApi = {
 
   checkHealth(): Promise<boolean> {
     return ipcRenderer.invoke('agent:check-health')
+  },
+
+  getServerActivity(): Promise<ServerActivity> {
+    return ipcRenderer.invoke('agent:server-activity')
+  },
+
+  forceStop(): Promise<ForceStopResult> {
+    return ipcRenderer.invoke('agent:force-stop')
   },
 
   getConnection() {
