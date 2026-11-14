@@ -111,7 +111,7 @@ The file becomes the GitHub Release body verbatim, so write for users of the app
 - Exists but is empty or still has placeholders: edit it in place. Never overwrite a draft.
 - Missing: `Copy-Item releases/TEMPLATE.md releases/vX.Y.Z.md`, then fill it in with the file-edit tool (UTF-8, LF; never `>` redirection).
 - Layout: `# vX.Y.Z`, `_Release date: YYYY-MM-DD_` (today), a one or two sentence summary, then `## Added`, `## Changed`, `## Fixed`, `## Known issues` (and `## Security` when fixing advisories). Delete sections with nothing to say (v0.10.1 has only "Fix").
-- One bullet per user-visible change: a **bold name**, then what it does and why it matters; sub-bullets for detail. Link issues or PRs (`[#28](https://github.com/siavashhub/lemonade-stand/issues/28)`) when commits reference them.
+- One bullet per user-visible change: a **bold name**, then what it does and why it matters; sub-bullets for detail. Link issues or PRs (`[#28](https://github.com/siavashdev/lemonade-stand/issues/28)`) when commits reference them.
 - Gather facts with `git log --oneline --no-merges vPREV..HEAD`, `git diff --stat vPREV..HEAD`, and `git diff --stat` for uncommitted work. Read the key diffs and the docs the sprint touched.
 - Classify by what changed, not by commit prefix: `add:` is used for nearly everything here, even "add: new release". Skip tests, CI, refactors and the release commit itself. Merge dependency bumps into a single bullet.
 - Never invent changes or "Known issues", and never leave template text. If the evidence is thin, say less.
