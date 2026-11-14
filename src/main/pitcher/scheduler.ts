@@ -1,32 +1,13 @@
 import type { Pitcher } from '@shared/types'
+import { isMissed, nextFireAt } from '@shared/schedule'
 import { readPitchers } from '../config'
 
-// Compute the next epoch-ms occurrence of a local "HH:MM" from `now`.
-function nextDailyAt(at: string, now = new Date()): number {
-  const [h, m] = at.split(':').map((n) => parseInt(n, 10))
-  const next = new Date(now)
-  next.setHours(h, m, 0, 0)
-  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1)
-  return next.getTime()
-}
-
-// True when a daily Pitcher's most recent scheduled time has already passed and
-// we have no record of handling it since, i.e. the app was closed at that time.
-// A fire counts as "handled" if it was either successfully poured (lastRunAt) or
-// deliberately stopped by the user (lastStoppedAt), so a pour you manually
-// stopped is not caught up and re-run on the next launch.
-function missedDaily(p: Pitcher, now = new Date()): boolean {
-  if (p.trigger.type !== 'daily') return false
-  const [h, m] = p.trigger.at.split(':').map((n) => parseInt(n, 10))
-  const todaysFire = new Date(now)
-  todaysFire.setHours(h, m, 0, 0)
-  if (todaysFire.getTime() > now.getTime()) return false // hasn't come round yet today
-  const handledSince = Math.max(p.lastRunAt ?? 0, p.lastStoppedAt ?? 0)
-  return handledSince < todaysFire.getTime()
-}
+// setTimeout overflows (and fires immediately) past ~24.8 days, which a monthly
+// task can exceed, so long waits are split into hops.
+const MAX_TIMEOUT_MS = 2 ** 31 - 1
 
 /**
- * Owns the timers for daily Pitchers plus the launch-time on-open / catch-up
+ * Owns the timers for scheduled Pitchers plus the launch-time on-open / catch-up
  * runs. Pours are handed off to an injected `pour` callback the main process
  * implements (it has the agent, history store, and window). Runs are serialized
  * through a queue and deferred while an interactive agent turn is active, so a
@@ -44,14 +25,14 @@ export class PitcherScheduler {
     private readonly isBusy: () => boolean
   ) {}
 
-  /** Call once after the window exists. Runs on-open + any missed dailies, then
-   * arms timers for future daily fires. */
+  /** Call once after the window exists. Runs on-open + any missed scheduled
+   * fires, then arms timers for future fires. */
   start(): void {
     this.stopped = false
     const pitchers = readPitchers(this.cwd).filter((p) => p.enabled)
     for (const p of pitchers) {
       if (p.trigger.type === 'on-open') this.enqueue(p.id)
-      else if (missedDaily(p)) this.enqueue(p.id)
+      else if (isMissed(p)) this.enqueue(p.id)
     }
     this.arm(pitchers)
   }
@@ -71,22 +52,41 @@ export class PitcherScheduler {
   }
 
   private arm(pitchers: Pitcher[]): void {
-    for (const p of pitchers) {
-      if (p.trigger.type === 'daily') this.scheduleDaily(p)
-    }
+    for (const p of pitchers) this.schedule(p, new Date())
   }
 
-  private scheduleDaily(p: Pitcher): void {
-    if (p.trigger.type !== 'daily') return
+  /** Arm the timer for `p`'s next fire strictly after `after`. */
+  private schedule(p: Pitcher, after: Date): void {
+    if (p.trigger.type === 'on-open') return
     const existing = this.timers.get(p.id)
     if (existing) clearTimeout(existing)
-    const delay = nextDailyAt(p.trigger.at) - Date.now()
+
+    let target: number
+    if (p.trigger.type === 'interval') {
+      target = after.getTime() + p.trigger.everyMinutes * 60_000
+    } else {
+      const next = nextFireAt(p.trigger, after)
+      if (next == null) return
+      target = next
+    }
+
     // setTimeout (not setInterval) so we recompute after each fire, which is
     // robust to clock drift, DST, and the machine sleeping through a fire.
-    const timer = setTimeout(() => {
-      this.enqueue(p.id)
-      this.scheduleDaily(p) // re-arm for tomorrow
-    }, Math.max(0, delay))
+    const delay = target - Date.now()
+    const isHop = delay > MAX_TIMEOUT_MS
+    const timer = setTimeout(
+      () => {
+        if (isHop) {
+          this.schedule(p, after) // only a hop of a long wait; recompute and keep waiting
+          return
+        }
+        this.enqueue(p.id)
+        // Re-arm from the fire time so a timer that lands a few ms early can't
+        // pick the same fire again.
+        this.schedule(p, new Date(Math.max(Date.now(), target)))
+      },
+      Math.min(Math.max(0, delay), MAX_TIMEOUT_MS)
+    )
     this.timers.set(p.id, timer)
   }
 

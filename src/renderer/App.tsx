@@ -19,10 +19,12 @@ import type {
   Pitcher,
   PitcherEvent,
   PitcherProposal,
+  PitcherTrigger,
   PlanStep,
   SessionSummary,
   TranscriptEntry
 } from '@shared/types'
+import { DAY_NAMES, describeTrigger as describeTriggerLabel } from '@shared/schedule'
 import {
   ArchiveBoxIcon,
   ArrowDownTrayIcon,
@@ -2630,8 +2632,7 @@ function Pitchers({
     }
   }
 
-  const describeTrigger = (p: Pitcher): string =>
-    p.trigger.type === 'on-open' ? 'When the app opens' : `Daily at ${p.trigger.at}`
+  const describeTrigger = (p: Pitcher): string => describeTriggerLabel(p.trigger)
 
   return (
     <div className="pantry-overlay history-overlay" onClick={onClose}>
@@ -2763,6 +2764,31 @@ function Pitchers({
 // The create/edit form for a single Pitcher. The tool whitelist is the security
 // crux: only the tools checked here are auto-approved when the Pitcher pours
 // unattended, so a scheduled task can never run a tool it wasn't granted.
+type WeeklyTrigger = Extract<PitcherTrigger, { type: 'weekly' }>
+type MonthlyTrigger = Extract<PitcherTrigger, { type: 'monthly' }>
+
+// A fresh trigger of the chosen type, keeping the time of day when switching
+// between the time-based ones.
+function defaultTrigger(type: string, at = '08:00'): PitcherTrigger {
+  switch (type) {
+    case 'weekly':
+      return { type: 'weekly', days: [1], at }
+    case 'monthly':
+      return { type: 'monthly', day: 1, at }
+    case 'interval':
+      return { type: 'interval', everyMinutes: 60 }
+    case 'on-open':
+      return { type: 'on-open' }
+    default:
+      return { type: 'daily', at }
+  }
+}
+
+const INTERVAL_PRESETS = [15, 30, 60, 120, 180, 240, 360, 480, 720, 1440]
+const intervalOptions = (current: number): number[] =>
+  INTERVAL_PRESETS.includes(current)
+    ? INTERVAL_PRESETS
+    : [...INTERVAL_PRESETS, current].sort((a, b) => a - b)
 function PitcherEditor({
   initial,
   tools,
@@ -2787,7 +2813,11 @@ function PitcherEditor({
         : [...d.allowedTools, qualified]
     }))
 
-  const canSave = draft.name.trim().length > 0 && draft.prompt.trim().length > 0
+  const canSave =
+    draft.name.trim().length > 0 &&
+    draft.prompt.trim().length > 0 &&
+    !('at' in draft.trigger && !draft.trigger.at) &&
+    !(draft.trigger.type === 'weekly' && draft.trigger.days.length === 0)
 
   const filteredTools = useMemo(() => {
     const query = toolSearch.toLowerCase()
@@ -2818,32 +2848,90 @@ function PitcherEditor({
         />
       </label>
 
-      <label className="pitcher-field">
+      <div className="pitcher-field">
         <span>Trigger</span>
         <div className="pitcher-row">
           <select
             value={draft.trigger.type}
             onChange={(e) =>
               set({
-                trigger:
-                  e.target.value === 'on-open'
-                    ? { type: 'on-open' }
-                    : { type: 'daily', at: '08:00' }
+                trigger: defaultTrigger(
+                  e.target.value,
+                  'at' in draft.trigger ? draft.trigger.at : undefined
+                )
               })
             }
           >
             <option value="daily">Daily at</option>
+            <option value="weekly">Weekly on</option>
+            <option value="monthly">Monthly on day</option>
+            <option value="interval">Every</option>
             <option value="on-open">When the app opens</option>
           </select>
-          {draft.trigger.type === 'daily' && (
+          {draft.trigger.type === 'monthly' && (
+            <input
+              type="number"
+              min={1}
+              max={31}
+              className="pitcher-day-number"
+              value={draft.trigger.day}
+              onChange={(e) => {
+                const day = Math.min(31, Math.max(1, parseInt(e.target.value, 10) || 1))
+                set({ trigger: { ...(draft.trigger as MonthlyTrigger), day } })
+              }}
+            />
+          )}
+          {(draft.trigger.type === 'daily' ||
+            draft.trigger.type === 'weekly' ||
+            draft.trigger.type === 'monthly') && (
             <input
               type="time"
               value={draft.trigger.at}
-              onChange={(e) => set({ trigger: { type: 'daily', at: e.target.value } })}
+              onChange={(e) => set({ trigger: { ...draft.trigger, at: e.target.value } as PitcherTrigger })}
             />
           )}
+          {draft.trigger.type === 'interval' && (
+            <select
+              value={draft.trigger.everyMinutes}
+              onChange={(e) =>
+                set({ trigger: { type: 'interval', everyMinutes: parseInt(e.target.value, 10) } })
+              }
+            >
+              {intervalOptions(draft.trigger.everyMinutes).map((m) => (
+                <option key={m} value={m}>
+                  {m % 60 === 0 ? `${m / 60} hour${m === 60 ? '' : 's'}` : `${m} minutes`}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
-      </label>
+        {draft.trigger.type === 'weekly' && (
+          <div className="pitcher-days">
+            {DAY_NAMES.map((name, day) => {
+              const trigger = draft.trigger as WeeklyTrigger
+              const on = trigger.days.includes(day)
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  className={`pitcher-day${on ? ' active' : ''}`}
+                  aria-pressed={on}
+                  title={name}
+                  onClick={() => {
+                    const days = on ? trigger.days.filter((d) => d !== day) : [...trigger.days, day]
+                    set({ trigger: { ...trigger, days: days.sort((a, b) => a - b) } })
+                  }}
+                >
+                  {name.slice(0, 3)}
+                </button>
+              )
+            })}
+          </div>
+        )}
+        {draft.trigger.type === 'interval' && (
+          <em className="pitcher-hint">Runs while the app is open; missed runs aren&apos;t caught up.</em>
+        )}
+      </div>
 
       <label className="pitcher-field">
         <span>Serve to</span>
