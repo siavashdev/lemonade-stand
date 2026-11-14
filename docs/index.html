@@ -877,6 +877,81 @@
         padding: 1px 7px;
       }
 
+      .feature-links {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 10px 20px;
+        margin-top: 24px;
+        font-size: 14px;
+      }
+      .feature-preview {
+        min-width: 0;
+      }
+      .feature-preview .line.tool {
+        flex-wrap: wrap;
+      }
+      .feature-preview .tool-label {
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
+      .preview-note {
+        margin: 12px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .monitor-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 10px;
+      }
+      .monitor-metric {
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg);
+      }
+      .monitor-metric span {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .monitor-metric b {
+        font-size: 22px;
+        color: var(--accent);
+      }
+      .monitor-chart {
+        width: 100%;
+        height: 90px;
+        display: block;
+        margin: 12px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .monitor-requests {
+        overflow-x: auto;
+        margin-top: 16px;
+      }
+      .monitor-requests table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+        text-align: left;
+      }
+      .monitor-requests caption {
+        text-align: left;
+        font-weight: 700;
+        margin-bottom: 8px;
+      }
+      .monitor-requests th,
+      .monitor-requests td {
+        padding: 6px;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      .monitor-requests th {
+        color: var(--muted);
+      }
+
       /* Napkin panel mock */
       .napkin {
         border: 1px solid var(--border);
@@ -1329,7 +1404,7 @@
       </div>
       <div class="stat-row reveal d3">
         <div class="stat"><b>100%</b><span>on-device inference</span></div>
-        <div class="stat"><b>8+</b><span>tool servers in the Pantry</span></div>
+        <div class="stat"><b>9+</b><span>tool servers in the Pantry</span></div>
         <div class="stat"><b>MCP</b><span>stdio &amp; Streamable HTTP</span></div>
       </div>
       <div class="scrollcue">Scroll to explore ↓</div>
@@ -1382,7 +1457,7 @@
           <h2>Watch the agent think out loud.</h2>
           <p class="lead">
             Chat turns and tool calls share one streaming transcript, so you can follow the agent's
-            reasoning, see which tools it reaches for, and read results as they arrive.
+            reasoning, see which tools it reaches for and read results as they arrive.
           </p>
           <ul class="feature-list">
             <li><span class="fi">🧠</span><div><b>Reasoning surface</b><span>Live "thinking" for models that support it.</span></div></li>
@@ -1416,22 +1491,59 @@
       </div>
     </section>
 
-    <!-- =================== APPROVALS + SECURITY =================== -->
+    <!-- =================== INFLUENCE =================== -->
+    <section id="s-influence">
+      <div class="grid2 rev">
+        <div class="copy reveal">
+          <span class="eyebrow">Influence</span>
+          <h2>Steer the agent while it works.</h2>
+          <p class="lead">
+            No need to wait for a reply to finish. The message box stays open during a run, so you can
+            add a detail, change the goal, or ask the agent to take a different approach.
+          </p>
+          <ul class="feature-list">
+            <li><span class="fi">↗</span><div><b>Enter: influence after this step</b><span>Your message joins the queue and the agent adjusts its plan after its current step.</span></div></li>
+            <li><span class="fi">⚡</span><div><b>Ctrl+Enter: interrupt now</b><span>Or use ⌘+Enter on macOS. The unfinished reply is discarded and the agent continues with your message.</span></div></li>
+            <li><span class="fi">💬</span><div><b>Keep track of pending messages</b><span>They appear as Queued above the box. If the run ends or you press Stop before they're used, the text returns to the box.</span></div></li>
+          </ul>
+        </div>
+        <div class="feature-preview reveal d1">
+          <div class="window">
+            <div class="topbar"><span class="brand">Influence · a task in progress</span></div>
+            <div class="transcript">
+              <div class="line user"><div class="role">you</div><div class="bubble">Compare the lemonade menus on these two websites.</div></div>
+              <div class="line tool"><span class="tool-label">playwright → browser_snapshot</span><span class="tool-detail">reading the first menu</span></div>
+              <div class="thinking"><span class="thinking-lemon">🍋</span><span>Comparing prices and sizes…</span></div>
+              <div class="reasoning"><b>Queued</b><br />Focus on sugar-free options and put the comparison in a table.</div>
+            </div>
+            <div class="composer">
+              <textarea readonly aria-label="Example influence message">Also include the price per cup.</textarea>
+            </div>
+          </div>
+          <p class="preview-note">Illustrative preview · Enter to queue, Ctrl+Enter to interrupt.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== APPROVALS + SELF-SERVE =================== -->
     <section id="s-approvals">
       <div class="grid2 rev">
         <div class="copy reveal">
           <span class="eyebrow">Safety by default</span>
-          <h2>Nothing runs without your say-so.</h2>
+          <h2>Your call: manual or Self-Serve.</h2>
           <p class="lead">
-            Before any tool executes you get an approval card showing the exact server, tool, and
-            arguments. Choose <strong>Allow once</strong>, <strong>Always allow</strong> for the session, or
-            <strong>Deny</strong>, or switch the footer <strong>Permissions</strong> menu to <strong>Allow all</strong> when you're moving fast.
+            <strong>Manual permissions</strong> is the default: approval cards show the server, tool
+            and arguments. Choose <strong>Allow once</strong>, <strong>Always allow</strong> for that
+            tool during the session, or <strong>Deny</strong>. For Self-Serve, open the footer
+            <strong>Permissions</strong> menu and choose <strong>Allow all</strong>.
           </p>
           <ul class="feature-list">
             <li><span class="fi">🛡️</span><div><b>Per-call approval</b><span>Review args before anything touches your machine.</span></div></li>
-            <li><span class="fi">⚡</span><div><b>Allow all</b><span>Opt-in mode that skips every prompt for all tools and sub-tools. Manual stays the default.</span></div></li>
-            <li><span class="fi">🔒</span><div><b>Trusted by design</b><span>Servers run with the app's privileges, you gate them.</span></div></li>
+            <li><span class="fi">⚡</span><div><b>Self-Serve (Allow all)</b><span>Every tool and sub-tool runs without asking. Open approval and keep-going prompts are accepted when you switch.</span></div></li>
+            <li><span class="fi">🔁</span><div><b>Keep going, stay in control</b><span>Allow all continues past the step limit without a prompt. Stop still halts the run and your permission mode is remembered across chats and restarts.</span></div></li>
+            <li><span class="fi">🫗</span><div><b>Pitchers keep their whitelist</b><span>Scheduled tasks still run only the tools you explicitly allowed for each task.</span></div></li>
           </ul>
+          <div class="callout">Only stock servers you trust: tools run with the app's privileges. Allow all removes the approval checks, not the risks.</div>
         </div>
         <div class="reveal d1">
           <div class="approval">
@@ -1485,7 +1597,7 @@
         <div class="pantry-card reveal">
           <div class="emoji">🔀</div>
           <h4>Git <code>git</code></h4>
-          <p>Status, diffs, log, and commits on a local repo.</p>
+          <p>Status, diffs, log and commits on a local repo.</p>
           <div class="toolchips"><span>git_status</span><span>git_diff</span><span>git_log</span><span>git_commit</span></div>
           <div style="margin-top:12px"><span class="stock">＋ Stock it</span></div>
         </div>
@@ -1517,10 +1629,103 @@
           <div class="toolchips"><span>convert_markdown_to_word</span></div>
           <div style="margin-top:12px"><span class="stock">＋ Stock it</span></div>
         </div>
+        <div class="pantry-card reveal d2">
+          <div class="emoji">🎭</div>
+          <h4>Playwright Browser <code>playwright</code></h4>
+          <p>Open pages, click, type, read snapshots and take screenshots in a real browser.</p>
+          <div class="toolchips"><span>browser_navigate</span><span>browser_click</span><span>browser_snapshot</span><span>browser_take_screenshot</span></div>
+          <div style="margin-top:12px"><a class="stock" href="#s-playwright">Explore browser settings ↓</a></div>
+        </div>
         <div class="pantry-card reveal d2" style="grid-column:1/-1;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;border-style:dashed">
           <div class="emoji">➕</div>
           <h4 style="justify-content:center">Bring your own</h4>
           <p>Any stdio or Streamable-HTTP MCP server works. Add it to <code>servers.json</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== PLAYWRIGHT BROWSER =================== -->
+    <section id="s-playwright">
+      <div class="grid2">
+        <div class="copy reveal">
+          <span class="eyebrow">Playwright Browser</span>
+          <h2>A real browser. An agent at the wheel.</h2>
+          <p class="lead">
+            Go beyond fetching a page: let the agent navigate, click links, fill fields, read page
+            snapshots and take screenshots. Stock <strong>Playwright Browser</strong> in the Pantry
+            to give it those tools.
+          </p>
+          <ul class="feature-list">
+            <li><span class="fi">🌐</span><div><b>Use a browser on your machine</b><span>Choose Google Chrome, Microsoft Edge, or Playwright Chromium. Edge is the default on Windows; Chrome elsewhere.</span></div></li>
+            <li><span class="fi">🔒</span><div><b>Private session by default</b><span>An in-memory profile keeps your own browser profile untouched. Cookies and sign-ins disappear when the tool restarts; turn private mode off to keep them.</span></div></li>
+            <li><span class="fi">👀</span><div><b>Watch it work, or run headless</b><span>A visible browser window opens by default. Change Browser, Private session, or Run headless on the Pantry card, then click Apply settings to restart the tool.</span></div></li>
+          </ul>
+        </div>
+        <div class="feature-preview reveal d1">
+          <div class="window">
+            <div class="topbar"><span class="brand">Playwright Browser · private session</span></div>
+            <div class="transcript">
+              <div class="line user"><div class="role">you</div><div class="bubble">Open example.com, tell me what it says and take a screenshot.</div></div>
+              <div class="line tool"><span class="tool-label">playwright → browser_navigate</span></div>
+              <div class="line tool"><span class="tool-label">playwright → browser_snapshot</span></div>
+              <div class="line tool"><span class="tool-label">playwright → browser_take_screenshot</span></div>
+              <div class="line"><div class="role">agent</div><div class="bubble">The page is titled <b>Example Domain</b> and explains its use in documentation examples. Screenshot captured.</div></div>
+            </div>
+          </div>
+          <p class="preview-note">Illustrative tool trace · Manual permissions still asks before unapproved actions.</p>
+          <div class="callout">
+            The server is bundled, so no Node install is needed. The browser is <strong>not</strong>
+            bundled: install Chrome or Edge, or download Playwright Chromium once with
+            <code>npx @playwright/mcp install-browser chrome-for-testing</code>.
+          </div>
+        </div>
+      </div>
+      <div class="callout reveal d2">
+        Browser tools can reach any site you can. Private mode clears sign-ins on restart, but
+        accounts you sign in to during a session remain reachable by the agent until then.
+        Review approval cards carefully, especially before choosing Allow all.
+      </div>
+    </section>
+
+    <!-- =================== RECIPES =================== -->
+    <section id="s-recipes">
+      <div class="grid2 rev">
+        <div class="copy reveal">
+          <span class="eyebrow">Recipes</span>
+          <h2>Write the procedure once. Use it again.</h2>
+          <p class="lead">
+            Save reusable, step-by-step instructions as Markdown in <strong>SKILL.md</strong> format.
+            Open <strong>Recipes</strong> in the top bar to write a recipe, paste a SKILL.md, or import
+            .md files. Export, pause, or delete recipes any time.
+          </p>
+          <ul class="feature-list">
+            <li><span class="fi">📖</span><div><b>Loaded only when needed</b><span>The agent sees enabled recipes' names and descriptions, then loads the full instructions when a task matches. Look for recipe → name in the chat.</span></div></li>
+            <li><span class="fi">📎</span><div><b>Attach a recipe yourself</b><span>Use the book button beside the message box to include instructions in your next message, especially with smaller models.</span></div></li>
+            <li><span class="fi">🫗</span><div><b>Repeat it with a Pitcher</b><span>Select recipes in a scheduled task so every run follows the same procedure. Recipes guide the agent; they don't bypass tool permissions.</span></div></li>
+          </ul>
+        </div>
+        <div class="feature-preview reveal d1">
+          <div class="napkin">
+            <div class="napkin-head"><span><span class="dot"></span>Recipe · Weekly stand report</span><span>SKILL.md</span></div>
+            <div class="napkin-body">
+              <pre class="code-block">---
+<span class="k">name:</span> Weekly stand report
+<span class="k">description:</span> Use for a weekly sales summary.
+---
+
+1. Read this week's sales from the database.
+2. Compare revenue with the previous week.
+3. List the top three items in a table.
+4. Show the report on the Napkin.</pre>
+              <div class="line tool"><span class="tool-label">recipe → Weekly stand report</span></div>
+              <div class="napkin-chips">
+                <span class="napkin-chip">Write or import</span>
+                <span class="napkin-chip">Attach to a message</span>
+                <span class="napkin-chip">Use in a Pitcher</span>
+              </div>
+            </div>
+          </div>
+          <p class="preview-note">Example recipe · Stored locally, with full instructions using context only when loaded or attached.</p>
         </div>
       </div>
     </section>
@@ -1533,7 +1738,7 @@
           <h2>Rich artifacts, jotted on the side.</h2>
           <p class="lead">
             A docked side panel that enriches replies with real artifacts, code with a Copy button,
-            rendered Markdown, Mermaid diagrams, SVG drawings, and images. Every bit of model-authored
+            rendered Markdown, Mermaid diagrams, SVG drawings and images. Every bit of model-authored
             markup is sanitized before it renders.
           </p>
           <ul class="feature-list">
@@ -1603,6 +1808,7 @@
       </div>
       <ul class="feature-list reveal d2" style="grid-template-columns:1fr 1fr;display:grid">
         <li><span class="fi">🎯</span><div><b>Tool whitelist</b><span>Only allowed tools auto-run during a pour.</span></div></li>
+        <li><span class="fi">📖</span><div><b>Recipes on every run</b><span>Attach saved procedures for consistent, repeatable results.</span></div></li>
         <li><span class="fi">🔁</span><div><b>Bounded retry</b><span>Flaky tool call? A pour retries once.</span></div></li>
         <li><span class="fi">🔔</span><div><b>Desktop notifications</b><span>Pinged when results are ready &amp; unfocused.</span></div></li>
         <li><span class="fi">⏳</span><div><b>Catch-up on launch</b><span>Missed scheduled runs fire when you reopen.</span></div></li>
@@ -1647,7 +1853,7 @@
           <span class="eyebrow">Models &amp; context</span>
           <h2>Manage models. Mind the budget.</h2>
           <p class="lead">
-            Download, load, and uninstall models without leaving the app, and filter a long list with
+            Download, load and uninstall models without leaving the app and filter a long list with
             model search. A live context-usage donut breaks down exactly where your window is going.
           </p>
           <ul class="feature-list">
@@ -1682,6 +1888,65 @@
               <div class="usage-li"><span class="sw" style="background:var(--c-results)"></span>Results<em>600</em></div>
             </div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================== MONITORING =================== -->
+    <section id="s-monitoring">
+      <div class="grid2 rev">
+        <div class="copy reveal">
+          <span class="eyebrow">Monitoring</span>
+          <h2>See the work, not just the fan noise.</h2>
+          <p class="lead">
+            The status-bar Monitoring pill shows model activity, generation speed and CPU at a
+            glance. Click it, or choose <strong>Monitoring</strong> in the hamburger menu, for the
+            full picture of your Lemonade server.
+          </p>
+          <ul class="feature-list">
+            <li><span class="fi">⚡</span><div><b>Inference</b><span>Generating or Idle, active requests, tokens per second, last-request speed, time to first token, prompt and cached tokens and totals.</span></div></li>
+            <li><span class="fi">📊</span><div><b>System graphs</b><span>CPU, memory, GPU, GPU memory and NPU usage, with three minutes of history. Unsupported readings show n/a.</span></div></li>
+            <li><span class="fi">🧾</span><div><b>Recent requests</b><span>See completed requests with their speed, time to first token and token counts.</span></div></li>
+            <li><span class="fi">↗</span><div><b>Pop it out beside your chat</b><span>Use the pop-out button or drag Monitoring past the app's edge to open a separate window that follows the app's theme.</span></div></li>
+          </ul>
+          <p class="preview-note">
+            Updates about once a second while the app is visible; pauses when hidden or minimized.
+            Server metrics need /stats and /system-stats and hardware readings depend on your drivers.
+            Estimates are marked ~. Omni replies arrive all at once, so their speed appears after a
+            model call finishes, not live while it works.
+          </p>
+        </div>
+        <div class="feature-preview reveal d1">
+          <div class="napkin">
+            <div class="napkin-head"><span><span class="dot"></span>Monitoring</span><span>Sample readings</span></div>
+            <div class="napkin-body">
+              <div class="monitor-grid">
+                <div class="monitor-metric"><span>Model state</span><b>Generating</b><span>1 active request</span></div>
+                <div class="monitor-metric"><span>Live speed</span><b>32.8 tok/s</b><span>Last three minutes ↓</span></div>
+                <div class="monitor-metric"><span>Last request</span><b>30.4 tok/s</b><span>128 generated tokens</span></div>
+                <div class="monitor-metric"><span>Time to first token</span><b>0.21 s</b><span>Last completed request</span></div>
+              </div>
+              <svg class="monitor-chart" viewBox="0 0 400 90" preserveAspectRatio="none" role="img" aria-label="Illustrative generation speed graph over three minutes">
+                <path d="M0 78 L20 78 L40 62 L60 70 L80 42 L100 48 L120 28 L140 37 L160 22 L180 30 L200 18 L220 26 L240 16 L260 24 L280 12 L300 20 L320 14 L340 22 L360 10 L380 18 L400 14 L400 90 L0 90 Z" fill="var(--accent-soft)" />
+                <path d="M0 78 L20 78 L40 62 L60 70 L80 42 L100 48 L120 28 L140 37 L160 22 L180 30 L200 18 L220 26 L240 16 L260 24 L280 12 L300 20 L320 14 L340 22 L360 10 L380 18 L400 14" fill="none" stroke="var(--accent)" stroke-width="2" />
+              </svg>
+              <div class="napkin-chips" aria-label="Sample system readings">
+                <span class="napkin-chip">CPU · 24%</span>
+                <span class="napkin-chip">Memory · 8.2 GB</span>
+                <span class="napkin-chip">GPU · 76%</span>
+                <span class="napkin-chip">GPU memory · 4.1 GB</span>
+                <span class="napkin-chip">NPU · n/a</span>
+              </div>
+              <div class="monitor-requests">
+                <table>
+                  <caption>Recent requests · example</caption>
+                  <thead><tr><th scope="col">Speed</th><th scope="col">First token</th><th scope="col">Prompt</th><th scope="col">Cached</th><th scope="col">Generated</th></tr></thead>
+                  <tbody><tr><td>30.4 tok/s</td><td>0.21 s</td><td>640</td><td>512</td><td>128</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <p class="preview-note">Illustrative preview, not live telemetry from your machine.</p>
         </div>
       </div>
     </section>
@@ -1728,7 +1993,7 @@
         </svg>
         <h2>Pour yourself a local agent.</h2>
         <p class="lead" style="margin:0 auto 8px">
-          Point it at a running <code>lemond</code> server, stock a few tools, and start talking. Your
+          Point it at a running <code>lemond</code> server, stock a few tools and start talking. Your
           data and your tokens never leave the machine.
         </p>
         <div class="cta-row">
