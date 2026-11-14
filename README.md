@@ -22,7 +22,7 @@ tools.
 
 ## Demo
 
-https://siavashhub.github.io/lemonade-stand
+https://siavashdev.github.io/lemonade-stand
 
 ## Prerequisites
 
@@ -30,7 +30,7 @@ https://siavashhub.github.io/lemonade-stand
 - A running `lemond` server. Note its base URL and port.
 
 ## Quick Run
-Headover to the [release page](https://github.com/siavashhub/lemonade-stand/releases) section and download and run the installer.
+Headover to the [release page](https://github.com/siavashdev/lemonade-stand/releases) section and download and run the installer.
 
 ## Dev Setup
 

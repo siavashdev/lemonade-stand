@@ -168,6 +168,27 @@ file**. Requires `uvx`.
 
 ---
 
+### 8. Word Documents 📄 (`word`)
+
+Turns Markdown the agent writes into a Word (`.docx`) document: headings, lists,
+tables, links, and code blocks. It only **creates** documents; it can't edit an
+existing one or add comments or tracked changes. No Word install, and no Node or
+`uvx` on your PATH, is needed.
+
+**Tools:** `convert_markdown_to_word`
+
+The tool saves to whatever absolute `.docx` path the agent picks, and it won't
+replace an existing file unless you ask it to. Tell the agent where to save, for
+example a folder the **Filesystem** server can access.
+
+**Try these prompts:**
+
+- "Write a one-page lemonade stand menu and **save it as a Word document** at `C:\temp\lemonade-stand\menu.docx`."
+- "Make a Word document with a table of this week's sales: Mon $20, Tue $35, Wed $28. Save it as `sales.docx` in my allowed folder."
+- "**Overwrite** `menu.docx` with a new version that adds an iced tea section."
+
+---
+
 ## Pitchers
 (scheduled tasks) run prompts fresh on a timer or when the app opens
   - **On-open trigger**: runs once each app launch
@@ -194,6 +215,7 @@ file**. Requires `uvx`.
 | Memory | "Remember my recipe uses 4 lemons." | No |
 | Time | "What time is it in Tokyo?" | No |
 | SQLite | "List the tables in my database." | `.db` file |
+| Word Documents | "Save a short menu as `menu.docx` in my allowed folder." | No (tell it where to save) |
 
 ---
 

@@ -20,7 +20,7 @@ This guide covers how to run the automated tests locally. Tests run on
 
 ## Prerequisites
 
-- Node.js 20+ (same as the app).
+- Node.js 22.12+ (same as the app; the bundled `markdown-to-word` server needs it).
 - Dependencies installed: `npm install`.
 - For the **optional** tests only: the `uv`/`uvx` toolchain on your PATH
   (see [Optional tests](#optional-uvx-based-server-tests)).
@@ -103,6 +103,7 @@ that's installed too.
 | [`test/logger.test.ts`](../test/logger.test.ts) | Core | The app's own log (`src/main/logger.ts`): the bounded buffer, `[tag]` splitting, console capture, and the opt-in log file. |
 | [`test/log-format.test.ts`](../test/log-format.test.ts) | Core | The log viewer's pure helpers (`src/renderer/logFormat.ts`): level and text filtering, copy formatting, and capped appends. |
 | [`test/mcp-filesystem.integration.test.ts`](../test/mcp-filesystem.integration.test.ts) | Core | Boots the real filesystem MCP server against a temp folder and drives `write_file` / `read_file` / `list_directory` through the app's `McpManager`, plus error handling. |
+| [`test/mcp-word.integration.test.ts`](../test/mcp-word.integration.test.ts) | Core | Boots the catalog's real `word` entry (the bundled `markdown-to-word` package) through `McpManager`, converts Markdown to a `.docx` on disk, and checks the no-overwrite and `.docx`-only guardrails. A second suite launches it through the real Electron binary (`ELECTRON_RUN_AS_NODE`), the way the packaged app runs bundled npm servers. |
 | [`test/mcp-optional.integration.test.ts`](../test/mcp-optional.integration.test.ts) | Optional | Same integration approach for the `uvx` servers: time, sqlite, git, and fetch. Skipped unless `RUN_UVX_TESTS` is set. |
 
 ## How tests run in CI
