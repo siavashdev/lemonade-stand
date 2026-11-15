@@ -144,10 +144,15 @@ without editing the README or relying on an external redirect service. Keep
 the buttons and supported-platform table in sync if the build architectures
 change.
 
-Stable links become available with the first release containing this workflow
-step; existing releases are not modified. If a platform build fails, its
-installer and stable copy are absent from that release. The README also links
-to the latest release page so users can see which downloads are available.
+Stable links are available starting with
+[v0.13.0](https://github.com/siavashdev/lemonade-stand/releases/tag/v0.13.0).
+That release was backfilled with checksum-verified copies of its existing
+installers, without rebuilding or changing the tag. Future releases create
+the stable copies automatically through the workflow.
+
+If a platform build fails, its installer and stable copy are absent from that
+release. The README also links to the latest release page so users can see
+which downloads are available.
 
 The README badges show the latest non-prerelease version, the latest Release
 workflow run's status, and the total download count for all release assets.
