@@ -99,6 +99,29 @@ jobs:
         run: npm run ${{ matrix.script }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create stable download filename
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { copyFileSync, readdirSync } from 'node:fs'
+          import { join } from 'node:path'
+
+          const targets = {
+            win32: { platform: 'Windows', extension: '.exe' },
+            darwin: { platform: 'macOS', extension: '.dmg' },
+            linux: { platform: 'Linux', extension: '.AppImage' }
+          }
+          const target = targets[process.platform]
+          if (!target) throw new Error(`Unsupported download platform: ${process.platform}`)
+
+          const installers = readdirSync('dist').filter(name => name.endsWith(target.extension))
+          if (installers.length !== 1) {
+            throw new Error(`Expected one ${target.extension} installer, found ${installers.length}`)
+          }
+          const filename = `Lemonade-Stand-${target.platform}-${process.arch}${target.extension}`
+          copyFileSync(join('dist', installers[0]), join('dist', filename))
+          console.log(`Stable download: ${filename} (copy of ${installers[0]})`)
+          NODE
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:

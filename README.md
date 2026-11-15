@@ -1,7 +1,22 @@
 # Lemonade Stand
 
+[![Latest Release](https://img.shields.io/github/v/release/siavashdev/lemonade-stand?label=Latest%20Release&color=f5c542)](https://github.com/siavashdev/lemonade-stand/releases/latest)
+[![GitHub downloads](https://img.shields.io/github/downloads/siavashdev/lemonade-stand/total?label=GitHub%20downloads&color=22b07d)](https://github.com/siavashdev/lemonade-stand/releases)
+[![Release pipeline](https://img.shields.io/github/actions/workflow/status/siavashdev/lemonade-stand/release.yml?label=Release%20pipeline)](https://github.com/siavashdev/lemonade-stand/actions/workflows/release.yml)
+
 ![Lemonade Stand](resources/banner.svg)
 
+<p align="center">
+  <a href="https://github.com/siavashdev/lemonade-stand/releases/latest/download/Lemonade-Stand-Windows-x64.exe">
+    <img src="https://img.shields.io/badge/Windows_x64-Download_EXE-f5c542?style=for-the-badge" height="26" alt="Download the latest Lemonade Stand for Windows x64 (EXE)" />
+  </a>
+  <a href="https://github.com/siavashdev/lemonade-stand/releases/latest/download/Lemonade-Stand-macOS-arm64.dmg">
+    <img src="https://img.shields.io/badge/macOS_Apple_Silicon-Download_DMG-f5c542?style=for-the-badge&logo=apple&logoColor=17262a" height="26" alt="Download the latest Lemonade Stand for macOS Apple Silicon (DMG)" />
+  </a>
+  <a href="https://github.com/siavashdev/lemonade-stand/releases/latest/download/Lemonade-Stand-Linux-x64.AppImage">
+    <img src="https://img.shields.io/badge/Linux_x64-Download_AppImage-f5c542?style=for-the-badge&logo=linux&logoColor=17262a" height="26" alt="Download the latest Lemonade Stand for Linux x64 (AppImage)" />
+  </a>
+</p>
 
 A desktop **MCP client / agent host** that drives local models served by
 [Lemonade](https://github.com/lemonade-sdk/lemonade) (`lemond`).
@@ -24,13 +39,31 @@ tools.
 
 https://siavashdev.github.io/lemonade-stand
 
+## Supported platforms
+
+| Platform | CPU architecture | Installer |
+| --- | --- | --- |
+| Windows | x64 (Intel / AMD) | [EXE setup](https://github.com/siavashdev/lemonade-stand/releases/latest/download/Lemonade-Stand-Windows-x64.exe) |
+| macOS | ARM64 (Apple Silicon) | [DMG](https://github.com/siavashdev/lemonade-stand/releases/latest/download/Lemonade-Stand-macOS-arm64.dmg) |
+| Linux | x64 (Intel / AMD) | [AppImage](https://github.com/siavashdev/lemonade-stand/releases/latest/download/Lemonade-Stand-Linux-x64.AppImage) |
+
+Lemonade Stand is a client: it needs a running local or remote `lemond` server.
+GPU / NPU support depends on that server, not on the client installer; see
+[Lemonade's supported platforms](https://github.com/lemonade-sdk/lemonade#supported-platforms).
+
 ## Prerequisites
 
-- Node.js 22.12+ (tested on 22.23 and 24).
+- Node.js 22.12+ (development only; tested on 22.23 and 24).
 - A running `lemond` server. Note its base URL and port.
 
 ## Quick Run
-Headover to the [release page](https://github.com/siavashdev/lemonade-stand/releases) section and download and run the installer.
+Use a download button above, or head to the
+[latest release page](https://github.com/siavashdev/lemonade-stand/releases/latest),
+then download and run the installer for your platform.
+
+The **GitHub downloads** badge uses Shields.io to sum GitHub's release-asset
+`download_count` values across all releases. It counts downloads, not unique
+users or installations, and includes auxiliary assets such as blockmaps.
 
 ## Dev Setup
 
