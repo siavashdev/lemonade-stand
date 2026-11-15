@@ -114,7 +114,8 @@ Pushing the `v*` tag triggers [`.github/workflows/release.yml`](../.github/workf
 1. **gate**: runs `check-release.mjs "<tag>"` and a type-check.
 2. **audit**: scans npm dependencies with `npm audit` and fails on any
    high/critical advisory.
-3. **build**: packages installers on Windows, macOS, and Linux in parallel.
+3. **build**: packages installers on Windows, macOS, and Linux in parallel, then
+   copies each installer to a stable, architecture-specific download filename.
 4. **release**: creates the GitHub Release named after the tag, using
    `releases/<tag>.md` as the body, and attaches every installer.
 
@@ -124,6 +125,35 @@ release is created, fix the issue, then retag.
 
 > A vulnerability found here means a dependency needs updating. Run
 > `npm audit fix` (or bump the offending package), commit, and retag.
+
+### README download links
+
+Each successful platform build uploads both its original versioned installer and
+a copy with a stable name:
+
+| Build | Stable filename |
+| --- | --- |
+| Windows x64 | `Lemonade-Stand-Windows-x64.exe` |
+| macOS Apple Silicon | `Lemonade-Stand-macOS-arm64.dmg` |
+| Linux x64 | `Lemonade-Stand-Linux-x64.AppImage` |
+
+The names use the build runner's actual CPU architecture (`process.arch`).
+The [README](../README.md) buttons use GitHub's
+`releases/latest/download/<stable-filename>` URLs, so they follow new releases
+without editing the README or relying on an external redirect service. Keep
+the buttons and supported-platform table in sync if the build architectures
+change.
+
+Stable links become available with the first release containing this workflow
+step; existing releases are not modified. If a platform build fails, its
+installer and stable copy are absent from that release. The README also links
+to the latest release page so users can see which downloads are available.
+
+The README badges show the latest non-prerelease version, the latest Release
+workflow run's status, and the total download count for all release assets.
+Shields.io obtains the download total from GitHub's per-asset `download_count`
+values; this is not a unique-user count, and includes blockmaps and both
+versioned and stable installer assets.
 
 ## Hotfix
 If fixes can be done on on new release then continue usual flow, if not 
